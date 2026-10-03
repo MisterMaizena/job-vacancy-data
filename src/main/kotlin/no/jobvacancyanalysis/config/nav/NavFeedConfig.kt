@@ -14,6 +14,7 @@ import org.springframework.web.client.RestClient
 @EnableConfigurationProperties(NavFeedProperties::class)
 class NavFeedConfig {
 
+	// Spring creates this shared NAV feed client at startup
 	@Bean
 	fun navFeedClient(
 		mapper: NavFeedPageMapper,

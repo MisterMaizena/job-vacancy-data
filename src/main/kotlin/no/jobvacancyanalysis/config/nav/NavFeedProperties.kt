@@ -9,6 +9,7 @@ data class NavFeedProperties(
 	val token: String,
 	val connectTimeout: Duration = Duration.ofSeconds(5),
 	val readTimeout: Duration = Duration.ofSeconds(30),
+	// Counts the initial request as attempt one.
 	val retryMaxAttempts: Int = 3,
 	val retryWaitDuration: Duration = Duration.ofMillis(500),
 ) {

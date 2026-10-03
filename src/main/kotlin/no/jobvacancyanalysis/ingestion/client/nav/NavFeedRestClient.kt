@@ -33,6 +33,7 @@ class NavFeedRestClient(
 			.build(),
 	)
 
+	// Retry a single page request; NavFeedPageWalker decides when to request the next page.
 	override fun fetchPage(cursor: FeedPageCursor?): FeedFetchResult =
 		Retry.decorateSupplier(retry, Supplier { fetchPageOnce(cursor) }).get()
 
@@ -85,6 +86,7 @@ class NavFeedRestClient(
 						"NAV feed page could not be mapped: ${exception.message}",
 					)
 				}
+				// These response headers belong to this page; the next page gets its own when requested.
 				FeedFetchResult.Page(
 					page = page,
 					cursor = FeedPageCursor(

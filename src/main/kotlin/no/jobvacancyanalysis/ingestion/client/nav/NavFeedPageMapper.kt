@@ -60,6 +60,7 @@ class NavFeedPageMapper(
 			dateModified = optionalDateTime(node),
 			feedEntry = FeedEntry(
 				uuid = requiredText(entryNode, "uuid"),
+				// Keep status as text so a new NAV status doesn't make the whole page fail to map.
 				status = requiredText(entryNode, "status"),
 				title = requiredText(entryNode, "title"),
 				businessName = requiredText(entryNode, "businessName"),

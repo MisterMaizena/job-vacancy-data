@@ -3,6 +3,8 @@ package no.jobvacancyanalysis.ingestion.client.nav
 import no.jobvacancyanalysis.ingestion.application.nav.FeedFetchResult
 import no.jobvacancyanalysis.ingestion.application.nav.FeedPageCursor
 
+// Passes each fetched page to onPage; walk returns only the outcome and last cursor.
+// Save lastCursor if the caller needs to resume later.
 class NavFeedPageWalker(
 	private val client: NavFeedClient,
 ) {
@@ -10,6 +12,7 @@ class NavFeedPageWalker(
 		initialCursor: FeedPageCursor? = null,
 		onPage: (FeedFetchResult.Page) -> Unit,
 	): NavFeedPageWalkResult {
+		// A repeated link would otherwise keep this loop running forever.
 		val visitedPageUrls = mutableSetOf<String>()
 		var cursor = initialCursor
 		var lastCursor: FeedPageCursor? = null
