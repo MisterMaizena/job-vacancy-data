@@ -1,21 +1,43 @@
 package no.jobvacancyanalysis.ingestion.client.nav
 
 import java.net.URI
+import java.time.Duration
+import java.util.function.Supplier
+import io.github.resilience4j.retry.Retry
+import io.github.resilience4j.retry.RetryConfig
 import no.jobvacancyanalysis.ingestion.application.nav.FeedFetchResult
 import no.jobvacancyanalysis.ingestion.application.nav.FeedPageCursor
 import org.springframework.http.HttpStatus
+import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.toEntity
+import tools.jackson.core.JacksonException
 
 class NavFeedRestClient(
 	private val restClient: RestClient,
 	private val mapper: NavFeedPageMapper,
 	baseUrl: String,
+	retryMaxAttempts: Int,
+	retryWaitDuration: Duration,
 ) : NavFeedClient {
 
 	private val baseUri: URI = parseBaseUrl(baseUrl)
+	private val retry = Retry.of(
+		"nav-feed",
+		RetryConfig.custom<FeedFetchResult>()
+			.maxAttempts(retryMaxAttempts)
+			.waitDuration(retryWaitDuration)
+			.retryOnException { exception ->
+				exception is ResourceAccessException || exception is NavFeedRetryableException
+			}
+			.build(),
+	)
 
-	override fun fetchPage(cursor: FeedPageCursor?): FeedFetchResult {
+	// Retry a single page request; NavFeedPageWalker decides when to request the next page.
+	override fun fetchPage(cursor: FeedPageCursor?): FeedFetchResult =
+		Retry.decorateSupplier(retry, Supplier { fetchPageOnce(cursor) }).get()
+
+	private fun fetchPageOnce(cursor: FeedPageCursor?): FeedFetchResult {
 		val targetUrl = cursor?.let { validateFeedUrl(it.url) } ?: initialFeedUrl()
 
 		val spec = restClient.get().uri(targetUrl)
@@ -24,7 +46,27 @@ class NavFeedRestClient(
 
 		val response = spec.retrieve()
 			.onStatus({ it.isError }) { _, clientResponse ->
-				throw NavFeedException("NAV feed request failed with status ${clientResponse.statusCode}")
+				val statusCode = clientResponse.statusCode
+				when {
+					statusCode.isSameCodeAs(HttpStatus.UNAUTHORIZED) ||
+						statusCode.isSameCodeAs(HttpStatus.FORBIDDEN) ->
+						throw NavFeedUnauthorizedException()
+
+					statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS) ->
+						throw NavFeedRateLimitedException(clientResponse.headers.getFirst("Retry-After"))
+
+					statusCode.isSameCodeAs(HttpStatus.NOT_FOUND) ||
+						statusCode.isSameCodeAs(HttpStatus.GONE) ->
+						throw NavFeedUnavailableException()
+
+					statusCode.is5xxServerError ||
+						statusCode.isSameCodeAs(HttpStatus.REQUEST_TIMEOUT) ->
+						throw NavFeedRetryableException(
+							"NAV feed request failed with retryable status $statusCode",
+						)
+
+					else -> throw NavFeedException("NAV feed request failed with status $statusCode")
+				}
 			}
 			.toEntity<String>()
 
@@ -32,12 +74,19 @@ class NavFeedRestClient(
 			response.statusCode.isSameCodeAs(HttpStatus.NOT_MODIFIED) -> FeedFetchResult.Unchanged
 			response.statusCode.isSameCodeAs(HttpStatus.OK) -> {
 				val body = response.body
-					?: throw NavFeedException("NAV feed response body missing for $targetUrl")
+					?: throw NavFeedMalformedResponseException(
+						"NAV feed response body missing for $targetUrl",
+					)
 				val page = try {
 					mapper.mapFeedPage(body)
+				} catch (_: JacksonException) {
+					throw NavFeedMalformedResponseException("NAV feed page JSON is malformed")
 				} catch (exception: IllegalArgumentException) {
-					throw NavFeedException("NAV feed page could not be mapped: ${exception.message}", exception)
+					throw NavFeedMalformedResponseException(
+						"NAV feed page could not be mapped: ${exception.message}",
+					)
 				}
+				// These response headers belong to this page; the next page gets its own when requested.
 				FeedFetchResult.Page(
 					page = page,
 					cursor = FeedPageCursor(
