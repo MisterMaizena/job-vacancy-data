@@ -11,7 +11,6 @@ import org.springframework.http.HttpStatus
 import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.toEntity
-import tools.jackson.core.JacksonException
 
 class NavFeedRestClient(
 	private val restClient: RestClient,
@@ -33,7 +32,10 @@ class NavFeedRestClient(
 			.build(),
 	)
 
-	// Retry a single page request; NavFeedPageWalker decides when to request the next page.
+	/**
+	 * Fetches one page. Transport and retryable server failures are retried;
+	 * mapping failures propagate to the caller without retry.
+	 */
 	override fun fetchPage(cursor: FeedPageCursor?): FeedFetchResult =
 		Retry.decorateSupplier(retry, Supplier { fetchPageOnce(cursor) }).get()
 
@@ -77,15 +79,7 @@ class NavFeedRestClient(
 					?: throw NavFeedMalformedResponseException(
 						"NAV feed response body missing for $targetUrl",
 					)
-				val page = try {
-					mapper.mapFeedPage(body)
-				} catch (_: JacksonException) {
-					throw NavFeedMalformedResponseException("NAV feed page JSON is malformed")
-				} catch (exception: IllegalArgumentException) {
-					throw NavFeedMalformedResponseException(
-						"NAV feed page could not be mapped: ${exception.message}",
-					)
-				}
+				val page = mapper.mapFeedPage(body)
 				// These response headers belong to this page; the next page gets its own when requested.
 				FeedFetchResult.Page(
 					page = page,
