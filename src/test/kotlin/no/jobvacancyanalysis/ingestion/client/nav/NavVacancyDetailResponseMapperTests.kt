@@ -15,7 +15,7 @@ class NavVacancyDetailResponseMapperTests {
 	fun `maps allowlisted response and nested ad fields while omitting contacts and unknown fields`() {
 		val response = mapper.mapVacancyDetailResponse(validResponseJson())
 
-		assertThat(response.uuid).isEqualTo("synthetic-entry-id")
+		assertThat(response.uuid).isEqualTo("550e8400-e29b-41d4-a716-446655440000")
 		assertThat(response.sistEndret).isEqualTo(OffsetDateTime.parse("2026-01-02T03:04:05Z"))
 		assertThat(response.status).isEqualTo("ACTIVE")
 
@@ -63,33 +63,52 @@ class NavVacancyDetailResponseMapperTests {
 			putNull("ad_content")
 		}
 
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapVacancyDetailResponse(jsonMapper.writeValueAsString(missing))
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapVacancyDetailResponse(jsonMapper.writeValueAsString(nullContent))
 		}
 	}
 
 	@Test
 	fun `rejects malformed response shape and invalid required fields`() {
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapVacancyDetailResponse("[]")
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapVacancyDetailResponse("""{"uuid":"synthetic"}""")
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapVacancyDetailResponse(
 				validResponseJson().replace("\"score\": 0.75", "\"score\": null"),
 			)
 		}
 	}
 
+	@Test
+	fun `aggregates detail field errors with paths and validates entry UUID`() {
+		val invalid = (jsonMapper.readTree(validResponseJson()) as ObjectNode).apply {
+			put("uuid", "not-a-uuid")
+			put("sistEndret", false)
+			(path("ad_content") as ObjectNode).put("title", 42)
+		}
+
+		val exception = assertThrows(NavFeedMappingException::class.java) {
+			mapper.mapVacancyDetailResponse(jsonMapper.writeValueAsString(invalid))
+		}
+
+		assertThat(exception.report.errors.map { it.path }).containsExactlyInAnyOrder(
+			"$.uuid",
+			"$.sistEndret",
+			"$.ad_content.title",
+		)
+	}
+
 	private fun validResponseJson(): String =
 		"""
 		{
-		  "uuid": "synthetic-entry-id",
+		  "uuid": "550e8400-e29b-41d4-a716-446655440000",
 		  "sistEndret": "2026-01-02T03:04:05Z",
 		  "status": "ACTIVE",
 		  "unknown_response_field": "unknown",

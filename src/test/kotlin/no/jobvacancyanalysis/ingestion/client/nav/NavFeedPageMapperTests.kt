@@ -4,7 +4,6 @@ import java.time.OffsetDateTime
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
-import tools.jackson.core.exc.StreamReadException
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.databind.node.ObjectNode
 
@@ -75,15 +74,15 @@ class NavFeedPageMapperTests {
 
 	@Test
 	fun `rejects missing required page and item fields`() {
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply { remove("version") })
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply {
 				(path("items").get(0) as ObjectNode).remove("content_text")
 			})
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply {
 				(path("items").get(0) as ObjectNode).remove("_feed_entry")
 			})
@@ -92,13 +91,13 @@ class NavFeedPageMapperTests {
 
 	@Test
 	fun `rejects invalid types and formats`() {
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply { put("next_url", 42) })
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply { put("id", "not-a-uuid") })
 		}
-		assertThrows(IllegalArgumentException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapPage(validPageNode().apply {
 				(path("items").get(0) as ObjectNode).put("date_modified", "not-a-date")
 			})
@@ -106,14 +105,32 @@ class NavFeedPageMapperTests {
 	}
 
 	@Test
-	fun `rejects non-object pages and malformed json`() {
-		assertThrows(IllegalArgumentException::class.java) {
+	fun `reports malformed page input as a structured mapping exception`() {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapFeedPage("[]")
 		}
-		assertThrows(StreamReadException::class.java) {
+		assertThrows(NavFeedMappingException::class.java) {
 			mapper.mapFeedPage("""{"items":""")
 		}
 	}
+
+	@Test
+	fun `aggregates page and item errors without returning a partial page`() {
+		val invalidPage = validPageNode().apply {
+			put("next_url", 42)
+			(path("items").get(0) as ObjectNode).put("content_text", false)
+		}
+
+		val exception = assertThrows(NavFeedMappingException::class.java) {
+			mapPage(invalidPage)
+		}
+
+		assertThat(exception.report.errors.map { it.path }).containsExactlyInAnyOrder(
+			"$.next_url",
+			"$.items[0].content_text",
+		)
+	}
+
 
 	private fun validPageNode(): ObjectNode =
 		jsonMapper.readTree(validPageJson()) as ObjectNode
