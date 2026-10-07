@@ -13,7 +13,7 @@ enum class BrregLifecycleStatus {
 	GONE,
 }
 
-// Allowlisted fields from BRReg only
+/** Carries only the BRREG fields allowed by the mapper's allowlist. */
 data class BrregOrganizationRecord(
 	val type: BrregRecordType,
 	val lifecycleStatus: BrregLifecycleStatus,

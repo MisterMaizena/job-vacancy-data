@@ -2,6 +2,7 @@ package no.jobvacancyanalysis.ingestion.client.brreg
 
 import no.jobvacancyanalysis.ingestion.application.brreg.BrregLifecycleStatus
 import no.jobvacancyanalysis.ingestion.application.brreg.BrregRecordType
+import no.jobvacancyanalysis.ingestion.client.validation.MappingError
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
@@ -13,7 +14,7 @@ class BrregRecordMapperTests {
 	private val mapper = BrregRecordMapper(jsonMapper)
 
 	@Test
-	fun `projects allowlisted fields and preserves source JSON types and nullable values`() {
+	fun `copies only allowlisted fields and preserves source JSON types and nullable values`() {
 		val record = mapper.mapMainEntity(validMainEntityJson())
 
 		assertThat(record.type).isEqualTo(BrregRecordType.MAIN_ENTITY)
@@ -71,11 +72,11 @@ class BrregRecordMapperTests {
 		(invalid.get("postadresse") as ObjectNode).put("adresse", "not-an-array")
 		invalid.put("forretningsadresse", "not-an-object")
 
-		val exception = assertThrows(BrregRecordValidationException::class.java) {
+		val exception = assertThrows(BrregRecordMappingException::class.java) {
 			mapper.mapMainEntity(jsonMapper.writeValueAsString(invalid))
 		}
 
-		assertThat(exception.errors.map { it.path }).containsExactlyInAnyOrder(
+		assertThat(exception.report.errors.map { it.path }).containsExactlyInAnyOrder(
 			"$.antallAnsatte",
 			"$.underAvvikling",
 			"$.registreringsdatoEnhetsregisteret",
@@ -88,23 +89,34 @@ class BrregRecordMapperTests {
 
 	@Test
 	fun `rejects mismatched response classes malformed roots and missing required deletion fields`() {
-		val mismatch = assertThrows(BrregRecordValidationException::class.java) {
+		val mismatch = assertThrows(BrregRecordMappingException::class.java) {
 			mapper.mapMainEntity(
 				validMainEntityJson().replace("\"Enhet\"", "\"Underenhet\""),
 			)
 		}
-		assertThat(mismatch.errors.map { it.path }).contains("$.respons_klasse")
+		assertThat(mismatch.report.errors.map { it.path }).contains("$.respons_klasse")
 
-		assertThrows(BrregRecordValidationException::class.java) {
+		assertThrows(BrregRecordMappingException::class.java) {
 			mapper.mapMainEntity("[]")
 		}
 
 		val incompleteDeleted = jsonMapper.readTree(validDeletedSubunitJson()) as ObjectNode
 		incompleteDeleted.remove("slettedato")
-		val deletionException = assertThrows(BrregRecordValidationException::class.java) {
+		val deletionException = assertThrows(BrregRecordMappingException::class.java) {
 			mapper.mapSubunit(jsonMapper.writeValueAsString(incompleteDeleted))
 		}
-		assertThat(deletionException.errors.map { it.path }).contains("$.slettedato")
+		assertThat(deletionException.report.errors.map { it.path }).contains("$.slettedato")
+	}
+
+	@Test
+	fun `reports malformed JSON with a structured mapping error`() {
+		val exception = assertThrows(BrregRecordMappingException::class.java) {
+			mapper.mapMainEntity("{")
+		}
+
+		assertThat(exception.report.errors).containsExactly(
+			MappingError("$", "valid JSON object", "malformed JSON"),
+		)
 	}
 
 	private fun validMainEntityJson(): String =
