@@ -5,28 +5,24 @@ import java.time.format.DateTimeParseException
 import no.jobvacancyanalysis.ingestion.application.brreg.BrregLifecycleStatus
 import no.jobvacancyanalysis.ingestion.application.brreg.BrregOrganizationRecord
 import no.jobvacancyanalysis.ingestion.application.brreg.BrregRecordType
+import no.jobvacancyanalysis.ingestion.client.validation.MappingError
+import no.jobvacancyanalysis.ingestion.client.validation.MappingErrorReport
+import no.jobvacancyanalysis.ingestion.client.validation.jsonNodeType
 import org.springframework.stereotype.Component
+import tools.jackson.core.JacksonException
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.node.ObjectNode
 
-data class BrregFieldValidationError(
-	val path: String,
-	val expected: String,
-	val actual: String,
-)
-
-class BrregRecordValidationException(
-	val errors: List<BrregFieldValidationError>,
-) : IllegalArgumentException(
-	"BRREG response failed validation: " +
-		errors.joinToString("; ") { "${it.path}: expected ${it.expected}, got ${it.actual}" },
-)
+class BrregRecordMappingException(
+	val report: MappingErrorReport,
+) : IllegalArgumentException(report.message("BRREG"))
 
 @Component
 class BrregRecordMapper(
 	private val objectMapper: ObjectMapper,
 ) {
+	/** Maps a main-entity response; invalid responses throw instead of producing a partial record. */
 	fun mapMainEntity(json: String): BrregOrganizationRecord =
 		mapRecord(
 			json = json,
@@ -36,6 +32,7 @@ class BrregRecordMapper(
 			currentShape = MAIN_ENTITY_SHAPE,
 		)
 
+	/** Maps a subunit response; invalid responses throw instead of producing a partial record. */
 	fun mapSubunit(json: String): BrregOrganizationRecord =
 		mapRecord(
 			json = json,
@@ -45,6 +42,10 @@ class BrregRecordMapper(
 			currentShape = SUBUNIT_SHAPE,
 		)
 
+	/**
+	 * Checks response class and lifecycle status, validates allowed fields, and creates a record  if validation succeeds
+	 * Field errors are collected before throwing, so no record is returned when any field is invalid.
+	 */
 	private fun mapRecord(
 		json: String,
 		type: BrregRecordType,
@@ -52,14 +53,22 @@ class BrregRecordMapper(
 		deletedResponseClass: String,
 		currentShape: JsonShape,
 	): BrregOrganizationRecord {
-		val root = objectMapper.readTree(json)
+		val root = try {
+			objectMapper.readTree(json)
+		} catch (_: JacksonException) {
+			throw BrregRecordMappingException(
+				MappingErrorReport(
+					listOf(MappingError(ROOT_JSON_PATH, "valid JSON object", "malformed JSON")),
+				),
+			)
+		}
 		if (root?.isObject != true) {
-			throw BrregRecordValidationException(
-				listOf(BrregFieldValidationError(ROOT_JSON_PATH, "object", actualType(root))),
+			throw BrregRecordMappingException(
+				MappingErrorReport(listOf(MappingError(ROOT_JSON_PATH, "object", jsonNodeType(root)))),
 			)
 		}
 
-		val errors = mutableListOf<BrregFieldValidationError>()
+		val errors = mutableListOf<MappingError>()
 		val responseClassNode = root.get(RESPONSE_CLASS_FIELD)
 		val responseClass = responseClassNode
 			?.takeIf(JsonNode::isString)
@@ -67,15 +76,15 @@ class BrregRecordMapper(
 
 		if (responseClassNode != null) {
 			if (!responseClassNode.isString) {
-				errors += BrregFieldValidationError(
+				errors += MappingError(
 					RESPONSE_CLASS_JSON_PATH,
 					"string",
-					actualType(responseClassNode),
+					jsonNodeType(responseClassNode),
 				)
 			} else if (responseClass != currentResponseClass &&
 				responseClass != deletedResponseClass
 			) {
-				errors += BrregFieldValidationError(
+				errors += MappingError(
 					RESPONSE_CLASS_JSON_PATH,
 					"\"$currentResponseClass\" or \"$deletedResponseClass\"",
 					"unrecognized string",
@@ -83,6 +92,7 @@ class BrregRecordMapper(
 			}
 		}
 
+		// Some BRREG responses omit the class: a deletion date then identifies a gone record.
 		val lifecycleStatus = when (responseClass) {
 			null -> if (root.has(DELETION_DATE_FIELD)) BrregLifecycleStatus.GONE
 				else BrregLifecycleStatus.CURRENT
@@ -91,20 +101,23 @@ class BrregRecordMapper(
 			else -> BrregLifecycleStatus.CURRENT
 		}
 
+		// Each lifecycle variant has a different field contract, so validate against its own shape.
 		val shape = when (lifecycleStatus) {
 			BrregLifecycleStatus.CURRENT -> currentShape
 			BrregLifecycleStatus.DELETED -> DELETED_SHAPE
 			BrregLifecycleStatus.GONE -> GONE_SHAPE
 		}
-		val fields = validateAndProject(root, "$", shape, errors) as ObjectNode
+		// Copy only allowed fields into a temporary object; discard it if validation fails.
+		val fields = validateAndCopyAllowedFields(root, "$", shape, errors) as ObjectNode
 		if (lifecycleStatus != BrregLifecycleStatus.GONE &&
 			responseClassNode?.isString == true
 		) {
 			fields.set(RESPONSE_CLASS_FIELD, responseClassNode.deepCopy())
 		}
 
+		// Build the domain record only after the full response has been checked.
 		if (errors.isNotEmpty()) {
-			throw BrregRecordValidationException(errors.distinct())
+			throw BrregRecordMappingException(MappingErrorReport(errors.distinct()))
 		}
 
 		return BrregOrganizationRecord(
@@ -115,21 +128,25 @@ class BrregRecordMapper(
 		)
 	}
 
-	private fun validateAndProject(
+	/**
+	 * Checks a node against its shape and copies only allowed fields.
+	 * A bad node records an error; other fields and array items in the parent are still checked.
+	 */
+	private fun validateAndCopyAllowedFields(
 		node: JsonNode,
 		path: String,
 		shape: JsonShape,
-		errors: MutableList<BrregFieldValidationError>,
+		errors: MutableList<MappingError>,
 	): JsonNode {
 		if (node.isNull) {
 			if (!shape.nullable) {
-				errors += BrregFieldValidationError(path, shape.expected(), "null")
+				errors += MappingError(path, shape.expected(), "null")
 			}
 			return node.deepCopy()
 		}
 
 		if (!shape.matches(node)) {
-			errors += BrregFieldValidationError(path, shape.expected(), actualType(node))
+			errors += MappingError(path, shape.expected(), jsonNodeType(node))
 			return node.deepCopy()
 		}
 
@@ -141,7 +158,7 @@ class BrregRecordMapper(
 					val child = node.get(field)
 					if (child == null) {
 						if (field in shape.required) {
-							errors += BrregFieldValidationError(
+							errors += MappingError(
 								childPath,
 								childShape.expected(),
 								"missing",
@@ -150,7 +167,7 @@ class BrregRecordMapper(
 					} else {
 						result.set(
 							field,
-							validateAndProject(child, childPath, childShape, errors),
+							validateAndCopyAllowedFields(child, childPath, childShape, errors),
 						)
 					}
 				}
@@ -161,7 +178,7 @@ class BrregRecordMapper(
 				val itemShape = requireNotNull(shape.items)
 				node.forEachIndexed { index, item ->
 					result.add(
-						validateAndProject(item, "$path[$index]", itemShape, errors),
+						validateAndCopyAllowedFields(item, "$path[$index]", itemShape, errors),
 					)
 				}
 				result
@@ -171,7 +188,7 @@ class BrregRecordMapper(
 					try {
 						LocalDate.parse(node.asString())
 					} catch (_: DateTimeParseException) {
-						errors += BrregFieldValidationError(
+						errors += MappingError(
 							path,
 							"string with format date ($DATE_FORMAT_LABEL)",
 							"string with invalid date format",
@@ -184,17 +201,6 @@ class BrregRecordMapper(
 		}
 	}
 
-	private fun actualType(node: JsonNode?): String = when {
-		node == null -> "missing"
-		node.isNull -> "null"
-		node.isObject -> "object"
-		node.isArray -> "array"
-		node.isString -> "string"
-		node.isNumber -> "number"
-		node.isBoolean -> "boolean"
-		else -> "unknown"
-	}
-
 	private enum class JsonKind {
 		STRING,
 		NUMBER,
@@ -203,6 +209,7 @@ class BrregRecordMapper(
 		ARRAY,
 	}
 
+	/** Describes an allowed JSON value, including nested fields and required/nullable rules. */
 	private data class JsonShape(
 		val kind: JsonKind,
 		val nullable: Boolean = false,
@@ -267,6 +274,7 @@ class BrregRecordMapper(
 			required = required,
 		)
 
+		/** Builds a record shape from field-type groups plus any nested field shapes. */
 		private fun recordShape(
 			required: Set<String>,
 			strings: Set<String> = emptySet(),

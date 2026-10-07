@@ -2,7 +2,7 @@ package no.jobvacancyanalysis.ingestion.application.nav
 
 import java.time.OffsetDateTime
 
-// One NAV feed response for a page; a null nextUrl marks the current end of the feed
+/** One NAV feed page; a null nextUrl means the feed has reached its current end. */
 data class FeedPage(
 	val id: String,
 	val items: List<FeedItem>,
@@ -10,7 +10,7 @@ data class FeedPage(
 	val nextId: String?,
 )
 
-// One feed event: id identifies the event, while feedEntry.uuid identifies the ad
+/** One feed event; id identifies the event, while feedEntry.uuid identifies the advertisement. */
 data class FeedItem(
 	val id: String,
 	val url: String,

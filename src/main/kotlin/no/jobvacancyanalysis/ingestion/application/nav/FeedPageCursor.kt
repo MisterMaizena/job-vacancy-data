@@ -1,6 +1,6 @@
 package no.jobvacancyanalysis.ingestion.application.nav
 
-// URL chooses the page to fetch; ETag and Last-Modified lets NAV say if that same page has changed.
+/** Identifies a feed page and holds its validators for conditional requests. */
 data class FeedPageCursor(
 	val url: String,
 	val etag: String? = null,

@@ -3,12 +3,14 @@ package no.jobvacancyanalysis.ingestion.client.nav
 import no.jobvacancyanalysis.ingestion.application.nav.FeedFetchResult
 import no.jobvacancyanalysis.ingestion.application.nav.FeedPageCursor
 
-// Passes each fetched page to onPage; walk returns the outcome and last cursor.
-// Fetch, mapping, or onPage exceptions stop the walk and propagate to its caller.
-// Save lastCursor if the caller needs to resume later.
 class NavFeedPageWalker(
 	private val client: NavFeedClient,
 ) {
+	/**
+	 * Fetches pages in sequence and passes each page to onPage.
+	 * Fetch, mapping, or callback failures stop the walk and propagate.
+	 * Use the returned lastCursor to resume later.
+	 */
 	fun walk(
 		initialCursor: FeedPageCursor? = null,
 		onPage: (FeedFetchResult.Page) -> Unit,
