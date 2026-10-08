@@ -6,14 +6,7 @@ import java.util.UUID
 import no.jobvacancydata.ingestion.application.nav.FeedEntry
 import no.jobvacancydata.ingestion.application.nav.FeedItem
 import no.jobvacancydata.ingestion.application.nav.FeedPage
-import no.jobvacancydata.ingestion.client.validation.MappingResult
-import no.jobvacancydata.ingestion.client.validation.buildWhenValid
-import no.jobvacancydata.ingestion.client.validation.validateNext
-import no.jobvacancydata.ingestion.client.validation.invalidMapping
-import no.jobvacancydata.ingestion.client.validation.validateEach
 import no.jobvacancydata.ingestion.client.validation.jsonNodeType
-import no.jobvacancydata.ingestion.client.validation.valueOrThrow
-import no.jobvacancydata.ingestion.client.validation.valueForValidResult
 import org.springframework.stereotype.Component
 import tools.jackson.core.JacksonException
 import tools.jackson.databind.JsonNode

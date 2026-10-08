@@ -9,15 +9,7 @@ import no.jobvacancydata.ingestion.application.nav.VacancyDetailResponse
 import no.jobvacancydata.ingestion.application.nav.VacancyEmployer
 import no.jobvacancydata.ingestion.application.nav.VacancyOccupationCategory
 import no.jobvacancydata.ingestion.application.nav.VacancyWorkLocation
-import no.jobvacancydata.ingestion.client.validation.MappingResult
-import no.jobvacancydata.ingestion.client.validation.buildWhenValid
-import no.jobvacancydata.ingestion.client.validation.validateNext
-import no.jobvacancydata.ingestion.client.validation.invalidMapping
 import no.jobvacancydata.ingestion.client.validation.jsonNodeType
-import no.jobvacancydata.ingestion.client.validation.validateEach
-import no.jobvacancydata.ingestion.client.validation.mapValidValue
-import no.jobvacancydata.ingestion.client.validation.valueOrThrow
-import no.jobvacancydata.ingestion.client.validation.valueForValidResult
 import org.springframework.stereotype.Component
 import tools.jackson.core.JacksonException
 import tools.jackson.databind.JsonNode
