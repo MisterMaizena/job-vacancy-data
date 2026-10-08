@@ -1,0 +1,9 @@
+{
+  "properties": [
+    {
+      "name": "app.ingestion.nav.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Used by @ConditionalOnNavIngestion; listed here so IDEs recognize this condition-only property."
+    }
+  ]
+}
