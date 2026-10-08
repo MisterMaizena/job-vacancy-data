@@ -2,7 +2,6 @@ package no.jobvacancydata.ingestion.client.brreg
 
 import java.net.URI
 import java.time.Duration
-import java.util.function.Supplier
 import io.github.resilience4j.retry.Retry
 import io.github.resilience4j.retry.RetryConfig
 import no.jobvacancydata.ingestion.application.brreg.BrregLookupResult
@@ -13,23 +12,17 @@ import org.springframework.http.HttpStatus
 import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientResponseException
+import org.springframework.web.client.body
 import tools.jackson.core.JacksonException
 import tools.jackson.databind.ObjectMapper
-
-internal const val BRREG_MAX_ORGANIZATION_NUMBERS_PER_REQUEST = 2_000
-
-internal fun partitionBrregOrganizationNumbers(
-	organizationNumbers: Collection<String>,
-): List<List<String>> = organizationNumbers.toSortedSet()
-	.chunked(BRREG_MAX_ORGANIZATION_NUMBERS_PER_REQUEST)
 
 class BrregRestClient(
 	private val restClient: RestClient,
 	private val mapper: BrregRecordMapper,
 	private val objectMapper: ObjectMapper,
 	baseUrl: String,
-	retryMaxAttempts: Int = 3,
-	retryWaitDuration: Duration = Duration.ofMillis(500),
+	retryMaxAttempts: Int,
+	retryWaitDuration: Duration,
 ) : BrregRegistryClient {
 	private val baseUri = URI.create(baseUrl.trimEnd('/'))
 	private val retry = Retry.of(
@@ -41,35 +34,30 @@ class BrregRestClient(
 			.build(),
 	)
 
-	init {
-		require(baseUri.scheme == "https" && !baseUri.host.isNullOrBlank()) {
-			"BRREG base URL must be an HTTPS URL with a host"
-		}
-		require(retryMaxAttempts >= 1) { "BRREG retry max attempts must be at least 1" }
-		require(!retryWaitDuration.isNegative) { "BRREG retry wait duration must not be negative" }
-	}
-
+	/** Validates and batches IDs, then returns each ID's main-entity and subunit lookup outcomes. */
 	override fun lookup(organizationNumbers: Collection<String>): List<BrregOrganizationLookup> {
 		val ids = organizationNumbers.toSortedSet()
 		if (ids.isEmpty()) return emptyList()
-		require(ids.all { ORGANIZATION_NUMBER_REGEX.matches(it) }) {
+		require(ids.all { BrregApiContract.ORGANIZATION_NUMBER_REGEX.matches(it) }) {
 			"BRREG organization numbers must contain exactly nine digits"
 		}
 		return partitionBrregOrganizationNumbers(ids).flatMap(::lookupBatch)
 	}
 
+	/** Searches both registers for a chunk; if an ID is missing from a search, fetches that record by ID. */
 	private fun lookupBatch(ids: List<String>): List<BrregOrganizationLookup> {
-		val main = search(ids, MAIN_SEARCH_PATH, "enheter", mapper::mapMainEntity)
-		val subunits = search(ids, SUBUNIT_SEARCH_PATH, "underenheter", mapper::mapSubunit)
+		val main = search(ids, BrregApiContract.MAIN_ENTITY_PATH, "enheter", mapper::mapMainEntity)
+		val subunits = search(ids, BrregApiContract.SUBUNIT_PATH, "underenheter", mapper::mapSubunit)
 		return ids.map { id ->
 			BrregOrganizationLookup(
 				organizationNumber = id,
-				mainEntity = main[id] ?: fetchDetail(id, MAIN_DETAIL_PATH, mapper::mapMainEntity),
-				subunit = subunits[id] ?: fetchDetail(id, SUBUNIT_DETAIL_PATH, mapper::mapSubunit),
+				mainEntity = main[id] ?: fetchDetail(id, BrregApiContract.MAIN_ENTITY_PATH, mapper::mapMainEntity),
+				subunit = subunits[id] ?: fetchDetail(id, BrregApiContract.SUBUNIT_PATH, mapper::mapSubunit),
 			)
 		}
 	}
 
+	/** Searches one register across all pages and collects records so each can be found by organization number. */
 	private fun search(
 		ids: Collection<String>,
 		path: String,
@@ -81,7 +69,7 @@ class BrregRestClient(
 		val records = linkedMapOf<String, BrregLookupResult.Found>()
 		while (nextUrl != null) {
 			val url = validatePageUrl(nextUrl)
-			val body = request { restClient.get().uri(url).retrieve().body(String::class.java) }
+			val body = request { restClient.get().uri(url).retrieve().body<String>() }
 				?: throw BrregMalformedResponseException("BRREG search response body is missing")
 			val root = try {
 				objectMapper.readTree(body)
@@ -120,20 +108,22 @@ class BrregRestClient(
 		return records
 	}
 
+	/** Called only when search has no match: 200 maps a record, 410 a removed record */
 	private fun fetchDetail(
 		id: String,
 		path: String,
 		mapRecord: (String) -> BrregOrganizationRecord,
 	): BrregLookupResult {
-		val url = "${baseUri.toString()}$path/$id"
+		val url = "${baseUri}$path/$id"
 		return try {
-			val body = request { restClient.get().uri(url).retrieve().body(String::class.java) }
+			val body = request { restClient.get().uri(url).retrieve().body<String>() }
 				?: throw BrregMalformedResponseException("BRREG detail response body is missing")
 			BrregLookupResult.Found(mapRecord(body))
 		} catch (exception: RestClientResponseException) {
 			when {
 				exception.statusCode.isSameCodeAs(HttpStatus.NOT_FOUND) -> BrregLookupResult.NotFound
 				exception.statusCode.isSameCodeAs(HttpStatus.GONE) -> {
+					// BRREG's 410 body carries the removed record's organization number and deletion date.
 					val body = exception.responseBodyAsString
 					if (body.isBlank()) throw BrregMalformedResponseException("BRREG 410 response body is missing")
 					BrregLookupResult.Found(mapRecord(body))
@@ -143,17 +133,19 @@ class BrregRestClient(
 		}
 	}
 
+	/** Applies the shared bounded retry policy to HTTP request. */
 	private fun <T> request(action: () -> T): T =
-		Retry.decorateSupplier(retry, Supplier { action() }).get()
+		Retry.decorateSupplier(retry) { action() }.get()
 
+	/** Rejects pagination links that leave the configured origin or the selected search endpoints. */
 	private fun validatePageUrl(url: String): String {
 		val uri = URI.create(url)
 		require(uri.scheme == baseUri.scheme && uri.host == baseUri.host && uri.port == baseUri.port) {
 			"BRREG pagination URL must use the configured origin"
 		}
 		val expectedPaths = setOf(
-			"${baseUri.path.trimEnd('/')}$MAIN_SEARCH_PATH",
-			"${baseUri.path.trimEnd('/')}$SUBUNIT_SEARCH_PATH",
+			"${baseUri.path.trimEnd('/')}${BrregApiContract.MAIN_ENTITY_PATH}",
+			"${baseUri.path.trimEnd('/')}${BrregApiContract.SUBUNIT_PATH}",
 		)
 		require(uri.path in expectedPaths) {
 			"BRREG pagination URL must target a selected search endpoint"
@@ -161,6 +153,7 @@ class BrregRestClient(
 		return uri.toString()
 	}
 
+	/** Retries transport failures, server errors, and rate limiting, but not 4xx failures. */
 	private fun isRetryable(exception: Throwable): Boolean = when (exception) {
 		is ResourceAccessException -> true
 		is RestClientResponseException -> exception.statusCode.is5xxServerError ||
@@ -168,16 +161,10 @@ class BrregRestClient(
 		else -> false
 	}
 
+	/** Expects main-entity records for `enheter` searches and subunit records for `underenheter` searches. */
 	private fun expectedType(embeddedKey: String) =
 		if (embeddedKey == "enheter") BrregRecordType.MAIN_ENTITY else BrregRecordType.SUBUNIT
 
-	private companion object {
-		val ORGANIZATION_NUMBER_REGEX = Regex("\\d{9}")
-		const val MAIN_SEARCH_PATH = "/api/enheter"
-		const val SUBUNIT_SEARCH_PATH = "/api/underenheter"
-		const val MAIN_DETAIL_PATH = "/api/enheter"
-		const val SUBUNIT_DETAIL_PATH = "/api/underenheter"
-	}
 }
 
 class BrregMalformedResponseException(message: String) : IllegalArgumentException(message)

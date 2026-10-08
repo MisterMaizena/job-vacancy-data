@@ -20,7 +20,7 @@ class BrregRestClientTests {
 
 	@Test
 	fun `partitions more than two thousand IDs into batches of two thousand and one`() {
-		val ids = List(BRREG_MAX_ORGANIZATION_NUMBERS_PER_REQUEST + 1) { index ->
+		val ids = List(BrregApiContract.MAX_ORGANIZATION_NUMBERS_PER_REQUEST + 1) { index ->
 			// Prefixed to make the index position the shape of an org.nr
 			(100_000_000 + index).toString()
 		}
@@ -28,7 +28,7 @@ class BrregRestClientTests {
 		val batches = partitionBrregOrganizationNumbers(ids)
 
 		assertThat(batches).hasSize(2)
-		assertThat(batches[0]).hasSize(BRREG_MAX_ORGANIZATION_NUMBERS_PER_REQUEST)
+		assertThat(batches[0]).hasSize(BrregApiContract.MAX_ORGANIZATION_NUMBERS_PER_REQUEST)
 		assertThat(batches[1]).containsExactly(ids.last())
 		assertThat(batches.flatten()).containsExactlyElementsOf(ids)
 	}
@@ -101,7 +101,14 @@ class BrregRestClientTests {
 	}
 
 	private fun createClient(restClient: RestClient) =
-		BrregRestClient(restClient, recordMapper, objectMapper, BASE, retryWaitDuration = Duration.ZERO)
+		BrregRestClient(
+			restClient,
+			recordMapper,
+			objectMapper,
+			BASE,
+			retryMaxAttempts = 3,
+			retryWaitDuration = Duration.ZERO,
+		)
 
 	private fun searchResponse(key: String, item: String?, next: String? = null): String {
 		val entries = item?.let { "[$it]" } ?: "[]"

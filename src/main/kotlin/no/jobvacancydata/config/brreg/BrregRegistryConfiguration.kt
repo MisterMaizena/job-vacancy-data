@@ -4,7 +4,6 @@ import java.net.http.HttpClient
 import no.jobvacancydata.ingestion.client.brreg.BrregRecordMapper
 import no.jobvacancydata.ingestion.client.brreg.BrregRestClient
 import no.jobvacancydata.ingestion.client.brreg.BrregRegistryClient
-import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.client.JdkClientHttpRequestFactory
@@ -12,8 +11,7 @@ import org.springframework.web.client.RestClient
 import tools.jackson.databind.ObjectMapper
 
 @Configuration
-@EnableConfigurationProperties(BrregRegistryProperties::class)
-class BrregRegistryConfig {
+class BrregRegistryConfiguration {
 	@Bean
 	fun brregRegistryClient(
 		mapper: BrregRecordMapper,

@@ -5,8 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 
 @ConfigurationProperties("nav.feed")
 data class NavFeedProperties(
-	val baseUrl: String,
-	val token: String,
+	val baseUrl: String = "https://pam-stilling-feed.nav.no",
 	val connectTimeout: Duration = Duration.ofSeconds(5),
 	val readTimeout: Duration = Duration.ofSeconds(30),
 	// Counts the initial request as attempt one.

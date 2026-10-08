@@ -39,15 +39,15 @@ class NavFeedHttpTimeoutTests {
 		try {
 			val properties = NavFeedProperties(
 				baseUrl = "http://127.0.0.1:${server.address.port}",
-				token = "synthetic-token",
 				connectTimeout = Duration.ofSeconds(1),
 				readTimeout = Duration.ofMillis(100),
 				retryMaxAttempts = 1,
 				retryWaitDuration = Duration.ZERO,
 			)
-			val client = NavFeedConfig().navFeedClient(
+			val client = NavFeedConfiguration().navFeedClient(
 				NavFeedPageMapper(JsonMapper.builder().build()),
 				properties,
+				"synthetic-token",
 			)
 
 			assertThrows<ResourceAccessException> {

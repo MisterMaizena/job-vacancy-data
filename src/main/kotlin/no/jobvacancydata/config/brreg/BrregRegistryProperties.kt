@@ -1,5 +1,6 @@
 package no.jobvacancydata.config.brreg
 
+import java.net.URI
 import java.time.Duration
 import org.springframework.boot.context.properties.ConfigurationProperties
 
@@ -12,6 +13,14 @@ data class BrregRegistryProperties(
 	val retryWaitDuration: Duration = Duration.ofMillis(500),
 ) {
 	init {
+		val uri = try {
+			URI.create(baseUrl)
+		} catch (exception: IllegalArgumentException) {
+			throw IllegalArgumentException("brreg.registry.base-url must be a valid HTTPS URL", exception)
+		}
+		require(uri.scheme == "https" && !uri.host.isNullOrBlank()) {
+			"brreg.registry.base-url must be an HTTPS URL with a host"
+		}
 		require(!connectTimeout.isZero && !connectTimeout.isNegative) {
 			"brreg.registry.connect-timeout must be positive"
 		}
