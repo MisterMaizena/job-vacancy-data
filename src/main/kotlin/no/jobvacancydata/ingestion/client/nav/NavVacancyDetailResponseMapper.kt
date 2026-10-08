@@ -1,8 +1,5 @@
 package no.jobvacancydata.ingestion.client.nav
 
-import java.time.OffsetDateTime
-import java.time.format.DateTimeParseException
-import java.util.UUID
 import no.jobvacancydata.ingestion.application.nav.VacancyAdContent
 import no.jobvacancydata.ingestion.application.nav.VacancyCategory
 import no.jobvacancydata.ingestion.application.nav.VacancyDetailResponse
@@ -11,7 +8,6 @@ import no.jobvacancydata.ingestion.application.nav.VacancyOccupationCategory
 import no.jobvacancydata.ingestion.application.nav.VacancyWorkLocation
 import no.jobvacancydata.ingestion.client.validation.jsonNodeType
 import org.springframework.stereotype.Component
-import tools.jackson.core.JacksonException
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
@@ -24,7 +20,7 @@ class NavVacancyDetailResponseMapper(
 		mapResponse(json).valueOrThrow { NavFeedMappingException(it) }
 
 	private fun mapResponse(json: String): MappingResult<VacancyDetailResponse> =
-		parseObject(json).validateNext { root ->
+		parseObject(objectMapper, json).validateNext { root ->
 			val uuid = requiredUuid(root, "uuid", "$")
 			val sistEndret = requiredDateTime(root, "sistEndret", "$")
 			val status = requiredText(root, "status", "$")
@@ -59,13 +55,11 @@ class NavVacancyDetailResponseMapper(
 		if (!node.isObject) {
 			return invalidMapping("$.ad_content", "object or null", jsonNodeType(node))
 		}
-		return mapAdContent(node, "$.ad_content").mapValidValue { it }
+		return mapAdContent(node).mapValidValue { it }
 	}
 
-	private fun mapAdContent(
-		node: JsonNode,
-		path: String,
-	): MappingResult<VacancyAdContent> {
+	private fun mapAdContent(node: JsonNode): MappingResult<VacancyAdContent> {
+		val path = "$.ad_content"
 		val uuid = requiredText(node, "uuid", path)
 		val published = requiredDateTime(node, "published", path)
 		val expires = requiredDateTime(node, "expires", path)
@@ -173,7 +167,7 @@ class NavVacancyDetailResponseMapper(
 	): MappingResult<VacancyCategory> {
 		if (!node.isObject) return invalidMapping(path, "object", jsonNodeType(node))
 
-		val score = requiredNumber(node, "score", path)
+		val score = requiredCategoryScore(node, path)
 		val categoryType = requiredText(node, "categoryType", path)
 		val code = requiredText(node, "code", path)
 		val name = requiredText(node, "name", path)
@@ -207,117 +201,15 @@ class NavVacancyDetailResponseMapper(
 		}
 	}
 
-	private fun parseObject(json: String): MappingResult<JsonNode> {
-		val root = try {
-			objectMapper.readTree(json)
-		} catch (_: JacksonException) {
-			return invalidMapping("$", "valid JSON object", "malformed JSON")
-		}
-		if (root?.isObject != true) return invalidMapping("$", "object", jsonNodeType(root))
-		return MappingResult.Valid(root)
-	}
-
-	private fun requiredArray(
+	private fun requiredCategoryScore(
 		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<List<JsonNode>> {
-		val value = node.get(field)
-		if (value?.isArray != true) {
-			return invalidMapping("$parentPath.$field", "array", jsonNodeType(value))
-		}
-		return MappingResult.Valid(value.toList())
-	}
-
-	private fun requiredObject(
-		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<JsonNode> {
-		val value = node.get(field)
-		if (value?.isObject != true) {
-			return invalidMapping("$parentPath.$field", "object", jsonNodeType(value))
-		}
-		return MappingResult.Valid(value)
-	}
-
-	private fun requiredText(
-		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<String> {
-		val value = node.get(field)
-		if (value?.isString != true) {
-			return invalidMapping("$parentPath.$field", "string", jsonNodeType(value))
-		}
-		return MappingResult.Valid(value.asString())
-	}
-
-	private fun optionalText(
-		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<String?> {
-		val value = node.get(field)
-		if (value == null || value.isNull) return MappingResult.Valid(null)
-		if (!value.isString) {
-			return invalidMapping("$parentPath.$field", "string or null", jsonNodeType(value))
-		}
-		return MappingResult.Valid(value.asString())
-	}
-
-	private fun requiredNumber(
-		node: JsonNode,
-		field: String,
 		parentPath: String,
 	): MappingResult<Double> {
-		val value = node.get(field)
+		val value = node.get("score")
 		if (value?.isNumber != true) {
-			return invalidMapping("$parentPath.$field", "number", jsonNodeType(value))
+			return invalidMapping("$parentPath.score", "number", jsonNodeType(value))
 		}
 		return MappingResult.Valid(value.asDouble())
 	}
 
-	private fun requiredDateTime(
-		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<OffsetDateTime> {
-		val value = node.get(field)
-		if (value?.isString != true) {
-			return invalidMapping(
-				"$parentPath.$field",
-				"RFC 3339 date-time string",
-				jsonNodeType(value),
-			)
-		}
-		return parseDateTime(value.asString(), "$parentPath.$field")
-	}
-
-	private fun requiredUuid(
-		node: JsonNode,
-		field: String,
-		parentPath: String,
-	): MappingResult<String> {
-		val value = node.get(field)
-		if (value?.isString != true) {
-			return invalidMapping("$parentPath.$field", "UUID string", jsonNodeType(value))
-		}
-		return parseUuid(value.asString(), "$parentPath.$field")
-	}
-
-	private fun parseUuid(value: String, path: String): MappingResult<String> =
-		try {
-			UUID.fromString(value)
-			MappingResult.Valid(value)
-		} catch (_: IllegalArgumentException) {
-			invalidMapping(path, "UUID string", "invalid UUID string")
-		}
-
-	private fun parseDateTime(value: String, path: String): MappingResult<OffsetDateTime> =
-		try {
-			MappingResult.Valid(OffsetDateTime.parse(value))
-		} catch (_: DateTimeParseException) {
-			invalidMapping(path, "RFC 3339 date-time string", "invalid date-time string")
-		}
 }
