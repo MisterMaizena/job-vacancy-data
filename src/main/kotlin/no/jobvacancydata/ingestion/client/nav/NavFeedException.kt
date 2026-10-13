@@ -25,3 +25,10 @@ open class NavFeedMalformedResponseException(
 	message: String,
 	cause: Throwable? = null,
 ) : NavFeedException(message, cause)
+
+/**
+ * The returned detail identity does not match the requested feed entry.
+ * This is a data-integrity failure: never substitute or guess another record.
+ */
+class NavFeedIdentityMismatchException(message: String) :
+	NavFeedMalformedResponseException(message)

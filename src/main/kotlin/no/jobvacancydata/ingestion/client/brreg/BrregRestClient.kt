@@ -2,18 +2,16 @@ package no.jobvacancydata.ingestion.client.brreg
 
 import java.net.URI
 import java.time.Duration
-import io.github.resilience4j.retry.Retry
-import io.github.resilience4j.retry.RetryConfig
 import no.jobvacancydata.ingestion.application.brreg.BrregLookupResult
 import no.jobvacancydata.ingestion.application.brreg.BrregOrganizationLookup
 import no.jobvacancydata.ingestion.application.brreg.BrregOrganizationRecord
-import no.jobvacancydata.ingestion.application.brreg.BrregRecordType
 import org.springframework.http.HttpStatus
 import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientResponseException
 import org.springframework.web.client.body
 import tools.jackson.core.JacksonException
+import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
 class BrregRestClient(
@@ -25,16 +23,9 @@ class BrregRestClient(
 	retryWaitDuration: Duration,
 ) : BrregRegistryClient {
 	private val baseUri = URI.create(baseUrl.trimEnd('/'))
-	private val retry = Retry.of(
-		"brreg-registry",
-		RetryConfig.custom<Any>()
-			.maxAttempts(retryMaxAttempts)
-			.waitDuration(retryWaitDuration)
-			.retryOnException(::isRetryable)
-			.build(),
-	)
+	private val retryPolicy = BrregRetryPolicy(retryMaxAttempts, retryWaitDuration)
 
-	/** Validates and batches IDs, then returns each ID's main-entity and subunit lookup outcomes. */
+	/** Validates and batches IDs, then returns each ID's main-entity and subunit outcomes. */
 	override fun lookup(organizationNumbers: Collection<String>): List<BrregOrganizationLookup> {
 		val ids = organizationNumbers.toSortedSet()
 		if (ids.isEmpty()) return emptyList()
@@ -44,127 +35,253 @@ class BrregRestClient(
 		return partitionBrregOrganizationNumbers(ids).flatMap(::lookupBatch)
 	}
 
-	/** Searches both registers for a chunk; if an ID is missing from a search, fetches that record by ID. */
+	/** Searches both registers, then detail-checks each ID a completed search did not return. */
 	private fun lookupBatch(ids: List<String>): List<BrregOrganizationLookup> {
-		val main = search(ids, BrregApiContract.MAIN_ENTITY_PATH, "enheter", mapper::mapMainEntity)
-		val subunits = search(ids, BrregApiContract.SUBUNIT_PATH, "underenheter", mapper::mapSubunit)
+		val mainSearch = searchRegister(ids, BrregApiContract.MAIN_ENTITY_PATH, ENHETER_KEY, mapper::mapMainEntity)
+		val subunitSearch = searchRegister(ids, BrregApiContract.SUBUNIT_PATH, UNDERENHETER_KEY, mapper::mapSubunit)
 		return ids.map { id ->
 			BrregOrganizationLookup(
 				organizationNumber = id,
-				mainEntity = main[id] ?: fetchDetail(id, BrregApiContract.MAIN_ENTITY_PATH, mapper::mapMainEntity),
-				subunit = subunits[id] ?: fetchDetail(id, BrregApiContract.SUBUNIT_PATH, mapper::mapSubunit),
+				mainEntity = mainSearch.outcomeFor(id)
+					?: fetchDetailOutcome(id, BrregApiContract.MAIN_ENTITY_PATH, mapper::mapMainEntity),
+				subunit = subunitSearch.outcomeFor(id)
+					?: fetchDetailOutcome(id, BrregApiContract.SUBUNIT_PATH, mapper::mapSubunit),
 			)
 		}
 	}
 
-	/** Searches one register across all pages and collects records so each can be found by organization number. */
-	private fun search(
+	/**
+	 * Searches one register across all pages and resolves each requested ID it returns.
+	 * An invalid record is rejected alone when its organization number is readable; any
+	 * other failure stops the search and leaves unresolved IDs pending with their valid
+	 * peers preserved — never treated as no-match.
+	 */
+	private fun searchRegister(
 		ids: Collection<String>,
 		path: String,
 		embeddedKey: String,
 		mapRecord: (String) -> BrregOrganizationRecord,
-	): Map<String, BrregLookupResult.Found> {
-		val firstUrl = "${baseUri}$path?organisasjonsnummer=${ids.joinToString(",")}"
-		var nextUrl: String? = firstUrl
-		val records = linkedMapOf<String, BrregLookupResult.Found>()
-		while (nextUrl != null) {
-			val url = validatePageUrl(nextUrl)
-			val body = request { restClient.get().uri(url).retrieve().body<String>() }
-				?: throw BrregMalformedResponseException("BRREG search response body is missing")
-			val root = try {
-				objectMapper.readTree(body)
-			} catch (_: JacksonException) {
-				throw BrregMalformedResponseException("BRREG search response is not valid JSON")
-			}
-			if (root?.isObject != true) {
-				throw BrregMalformedResponseException("BRREG search response is not a JSON object")
-			}
-			if (root.get("_links")?.isObject != true || root.get("page")?.isObject != true) {
-				throw BrregMalformedResponseException("BRREG search response is missing required paging metadata")
-			}
-			val embedded = root.get("_embedded")
-			val items = embedded?.get(embeddedKey)
-			if ((embedded != null && !embedded.isObject) || (items != null && !items.isArray)) {
-				throw BrregMalformedResponseException("BRREG search response is missing _embedded.$embeddedKey")
-			}
-			items?.forEach { item ->
-				val record = mapRecord(objectMapper.writeValueAsString(item))
-				if (record.type != expectedType(embeddedKey) || record.organizationNumber !in ids) {
-					throw BrregMalformedResponseException("BRREG search returned an unexpected record")
+	): RegisterSearch {
+		val outcomes = linkedMapOf<String, BrregLookupResult>()
+		var nextUrl: String? = "${baseUri}$path?organisasjonsnummer=${ids.joinToString(",")}"
+		try {
+			while (nextUrl != null) {
+				val root = requestSearchPage(validatePageUrl(nextUrl))
+				val embedded = root.get(EMBEDDED_FIELD)
+				val items = embedded?.get(embeddedKey)
+				if ((embedded != null && !embedded.isObject) || (items != null && !items.isArray)) {
+					throw BrregSearchFailedException("BRREG search response is missing _embedded.$embeddedKey")
 				}
-				if (records.putIfAbsent(record.organizationNumber, BrregLookupResult.Found(record)) != null) {
-					throw BrregMalformedResponseException("BRREG search returned a duplicate organization number")
+				items?.forEach { item ->
+					collectSearchRecord(item, ids, outcomes, mapRecord)
 				}
+				nextUrl = nextPageUrl(root)
 			}
-			val nextLink = root.path("_links").get("next")
-			val nextHref = nextLink?.get("href")
-			if (nextLink != null && (!nextLink.isObject || nextHref == null ||
-				(!nextHref.isNull && !nextHref.isString))
-			) {
-				throw BrregMalformedResponseException("BRREG search response has an invalid _links.next.href")
-			}
-			nextUrl = nextHref?.takeIf { it.isString }?.asString()
+		} catch (exception: Exception) {
+			return RegisterSearch(outcomes, failureReason = searchFailureReason(exception))
 		}
-		return records
+		return RegisterSearch(outcomes, failureReason = null)
 	}
 
-	/** Called only when search has no match: 200 maps a record, 410 a removed record */
-	private fun fetchDetail(
+	private fun collectSearchRecord(
+		item: JsonNode,
+		ids: Collection<String>,
+		outcomes: MutableMap<String, BrregLookupResult>,
+		mapRecord: (String) -> BrregOrganizationRecord,
+	) {
+		val rawOrganizationNumber = item.get(ORGANIZATION_NUMBER_FIELD)
+			?.takeIf(JsonNode::isString)
+			?.asString()
+		val record = try {
+			mapRecord(objectMapper.writeValueAsString(item))
+		} catch (exception: BrregRecordMappingException) {
+			// An attributable record is rejected alone; anything else makes the page untrustworthy.
+			if (rawOrganizationNumber != null && rawOrganizationNumber in ids) {
+				outcomes[rawOrganizationNumber] =
+					BrregLookupResult.Invalid(exception.report.message(SOURCE_NAME))
+				return
+			}
+			throw BrregSearchFailedException("BRREG search returned a record that failed validation")
+		}
+		if (record.organizationNumber !in ids) {
+			throw BrregSearchFailedException("BRREG search returned an organization number that was not requested")
+		}
+		if (outcomes.putIfAbsent(record.organizationNumber, BrregLookupResult.Found(record)) != null) {
+			outcomes[record.organizationNumber] =
+				BrregLookupResult.Invalid("BRREG search returned the organization number more than once")
+		}
+	}
+
+	private fun requestSearchPage(url: String): JsonNode {
+		val body = retryPolicy.execute { restClient.get().uri(url).retrieve().body<String>() }
+			?: throw BrregSearchFailedException("BRREG search response body is missing")
+		val root = try {
+			objectMapper.readTree(body)
+		} catch (_: JacksonException) {
+			throw BrregSearchFailedException("BRREG search response is not valid JSON")
+		}
+		if (root?.isObject != true) {
+			throw BrregSearchFailedException("BRREG search response is not a JSON object")
+		}
+		if (root.get(LINKS_FIELD)?.isObject != true || root.get(PAGE_FIELD)?.isObject != true) {
+			throw BrregSearchFailedException("BRREG search response is missing required paging metadata")
+		}
+		return root
+	}
+
+	private fun nextPageUrl(root: JsonNode): String? {
+		val nextLink = root.path(LINKS_FIELD).get(NEXT_LINK)
+		val nextHref = nextLink?.get(HREF_FIELD)
+		if (nextLink != null && (!nextLink.isObject || nextHref == null ||
+				(!nextHref.isNull && !nextHref.isString))
+		) {
+			throw BrregSearchFailedException("BRREG search response has an invalid _links.next.href")
+		}
+		return nextHref?.takeIf(JsonNode::isString)?.asString()
+	}
+
+	/** Called only when a search completed without the ID: 200 maps a record, 410 a removed one. */
+	private fun fetchDetailOutcome(
 		id: String,
 		path: String,
 		mapRecord: (String) -> BrregOrganizationRecord,
 	): BrregLookupResult {
 		val url = "${baseUri}$path/$id"
 		return try {
-			val body = request { restClient.get().uri(url).retrieve().body<String>() }
-				?: throw BrregMalformedResponseException("BRREG detail response body is missing")
+			val body = retryPolicy.execute { restClient.get().uri(url).retrieve().body<String>() }
+				?: return BrregLookupResult.Failed("BRREG detail response body is missing")
 			BrregLookupResult.Found(mapRecord(body))
 		} catch (exception: RestClientResponseException) {
 			when {
 				exception.statusCode.isSameCodeAs(HttpStatus.NOT_FOUND) -> BrregLookupResult.NotFound
-				exception.statusCode.isSameCodeAs(HttpStatus.GONE) -> {
-					// BRREG's 410 body carries the removed record's organization number and deletion date.
-					val body = exception.responseBodyAsString
-					if (body.isBlank()) throw BrregMalformedResponseException("BRREG 410 response body is missing")
-					BrregLookupResult.Found(mapRecord(body))
-				}
-				else -> throw exception
+				exception.statusCode.isSameCodeAs(HttpStatus.GONE) -> goneDetailOutcome(exception, mapRecord)
+				else -> BrregLookupResult.Failed(
+					"BRREG detail lookup failed with HTTP ${exception.statusCode.value()}",
+				)
 			}
+		} catch (exception: ResourceAccessException) {
+			BrregLookupResult.Failed("BRREG detail lookup failed with a transport error")
+		} catch (exception: BrregRecordMappingException) {
+			BrregLookupResult.Invalid(exception.report.message(SOURCE_NAME))
 		}
 	}
 
-	/** Applies the shared bounded retry policy to HTTP request. */
-	private fun <T> request(action: () -> T): T =
-		Retry.decorateSupplier(retry) { action() }.get()
+	private fun goneDetailOutcome(
+		exception: RestClientResponseException,
+		mapRecord: (String) -> BrregOrganizationRecord,
+	): BrregLookupResult {
+		// BRREG's 410 body carries the removed record's organization number and deletion date.
+		val body = exception.responseBodyAsString
+		if (body.isBlank()) return BrregLookupResult.Failed("BRREG 410 response body is missing")
+		return try {
+			BrregLookupResult.Found(mapRecord(body))
+		} catch (mappingException: BrregRecordMappingException) {
+			BrregLookupResult.Invalid(mappingException.report.message(SOURCE_NAME))
+		}
+	}
 
 	/** Rejects pagination links that leave the configured origin or the selected search endpoints. */
 	private fun validatePageUrl(url: String): String {
-		val uri = URI.create(url)
-		require(uri.scheme == baseUri.scheme && uri.host == baseUri.host && uri.port == baseUri.port) {
-			"BRREG pagination URL must use the configured origin"
+		val uri = try {
+			URI.create(url)
+		} catch (exception: IllegalArgumentException) {
+			throw BrregSearchFailedException("BRREG pagination URL is invalid")
+		}
+		if (uri.scheme != baseUri.scheme || uri.host != baseUri.host || uri.port != baseUri.port) {
+			throw BrregSearchFailedException("BRREG pagination URL must use the configured origin")
 		}
 		val expectedPaths = setOf(
 			"${baseUri.path.trimEnd('/')}${BrregApiContract.MAIN_ENTITY_PATH}",
 			"${baseUri.path.trimEnd('/')}${BrregApiContract.SUBUNIT_PATH}",
 		)
-		require(uri.path in expectedPaths) {
-			"BRREG pagination URL must target a selected search endpoint"
+		if (uri.path !in expectedPaths) {
+			throw BrregSearchFailedException("BRREG pagination URL must target a selected search endpoint")
 		}
 		return uri.toString()
 	}
 
-	/** Retries transport failures, server errors, and rate limiting, but not 4xx failures. */
-	private fun isRetryable(exception: Throwable): Boolean = when (exception) {
-		is ResourceAccessException -> true
-		is RestClientResponseException -> exception.statusCode.is5xxServerError ||
-			exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)
-		else -> false
+	/** Failure reasons carry the failure kind, never response content. */
+	private fun searchFailureReason(exception: Exception): String = when (exception) {
+		is BrregSearchFailedException -> exception.message!!
+		is RestClientResponseException -> "BRREG search failed with HTTP ${exception.statusCode.value()}"
+		is ResourceAccessException -> "BRREG search failed with a transport error"
+		else -> "BRREG search failed unexpectedly (${exception.javaClass.simpleName})"
 	}
 
-	/** Expects main-entity records for `enheter` searches and subunit records for `underenheter` searches. */
-	private fun expectedType(embeddedKey: String) =
-		if (embeddedKey == "enheter") BrregRecordType.MAIN_ENTITY else BrregRecordType.SUBUNIT
-
+	private companion object {
+		private const val ENHETER_KEY = "enheter"
+		private const val UNDERENHETER_KEY = "underenheter"
+		private const val EMBEDDED_FIELD = "_embedded"
+		private const val LINKS_FIELD = "_links"
+		private const val PAGE_FIELD = "page"
+		private const val NEXT_LINK = "next"
+		private const val HREF_FIELD = "href"
+		private const val ORGANIZATION_NUMBER_FIELD = "organisasjonsnummer"
+		private const val SOURCE_NAME = "BRREG"
+	}
 }
 
-class BrregMalformedResponseException(message: String) : IllegalArgumentException(message)
+/** Per-register search result: resolved outcomes plus why unresolved IDs must stay pending. */
+private class RegisterSearch(
+	private val outcomes: Map<String, BrregLookupResult>,
+	private val failureReason: String?,
+) {
+	/** The search outcome for one ID, or null to fall back to the detail endpoint. */
+	fun outcomeFor(id: String): BrregLookupResult? =
+		outcomes[id] ?: failureReason?.let(BrregLookupResult::Failed)
+}
+
+/** Internal marker for a search page that cannot be trusted or completed. */
+private class BrregSearchFailedException(message: String) : RuntimeException(message)
+
+/**
+ * Bounded blocking retries for BRREG requests. Transport failures, server errors, and
+ * rate limiting are retried; a 429 waits at least the server's Retry-After hint (capped),
+ * which Resilience4j's fixed-wait Retry cannot express.
+ */
+private class BrregRetryPolicy(
+	private val maxAttempts: Int,
+	private val waitDuration: Duration,
+) {
+	fun <T> execute(action: () -> T): T {
+		var attempt = 1
+		while (true) {
+			try {
+				return action()
+			} catch (exception: ResourceAccessException) {
+				if (attempt >= maxAttempts) throw exception
+				sleep(waitDuration)
+			} catch (exception: RestClientResponseException) {
+				val retryable = exception.statusCode.is5xxServerError ||
+					exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)
+				if (!retryable || attempt >= maxAttempts) throw exception
+				sleep(maxOf(waitDuration, retryAfterHint(exception)))
+			}
+			attempt++
+		}
+	}
+
+	private fun retryAfterHint(exception: RestClientResponseException): Duration {
+		if (!exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)) return Duration.ZERO
+		val seconds = exception.responseHeaders?.getFirst("Retry-After")?.toLongOrNull()
+			?: return Duration.ZERO
+		return Duration.ofSeconds(seconds.coerceAtMost(MAX_RETRY_AFTER_SECONDS))
+	}
+
+	private fun sleep(duration: Duration) {
+		try {
+			Thread.sleep(duration.toMillis())
+		} catch (exception: InterruptedException) {
+			Thread.currentThread().interrupt()
+			throw ResourceAccessException(
+				"Interrupted while waiting to retry a BRREG request",
+				java.io.IOException(exception),
+			)
+		}
+	}
+
+	private companion object {
+		// Bounds the wait so a large Retry-After hint cannot stall a worker run.
+		private const val MAX_RETRY_AFTER_SECONDS = 30L
+	}
+}

@@ -21,6 +21,7 @@ import tools.jackson.databind.json.JsonMapper
 class NavFeedRestClientTests {
 	private val jsonMapper = JsonMapper.builder().build()
 	private val pageMapper = NavFeedPageMapper(jsonMapper)
+	private val detailMapper = NavVacancyDetailResponseMapper(jsonMapper)
 
 	@Test
 	fun `fetches first page and returns next cursor`() {
@@ -227,6 +228,7 @@ class NavFeedRestClientTests {
 		NavFeedRestClient(
 			restClient,
 			pageMapper,
+			detailMapper,
 			TEST_BASE_URL,
 			retryMaxAttempts,
 			Duration.ZERO,

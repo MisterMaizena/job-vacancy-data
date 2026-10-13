@@ -3,6 +3,7 @@ package no.jobvacancydata.ingestion.client.nav
 import no.jobvacancydata.ingestion.application.nav.FeedFetchResult
 import no.jobvacancydata.ingestion.application.nav.FeedPage
 import no.jobvacancydata.ingestion.application.nav.FeedPageCursor
+import no.jobvacancydata.ingestion.application.nav.VacancyDetailFetchResult
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -86,6 +87,9 @@ class NavFeedPageWalkerTests {
 			requestedCursors.add(cursor)
 			return results[nextResultIndex++]
 		}
+
+		override fun fetchVacancyDetail(detailUrl: String): VacancyDetailFetchResult =
+			throw UnsupportedOperationException("Detail fetch is not used by page walking")
 	}
 
 	private companion object {
