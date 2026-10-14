@@ -4,6 +4,6 @@ package no.jobvacancydata.ingestion.client.nav
 object NavFeedPaths {
 	const val FEED_PATH = "/api/v1/feed"
 
-	/** Feed-entry detail path prefix; a detail URL appends the entry ID as its last segment. */
+	/** Path for fetching one feed entry's details; append that entry's ID. */
 	const val FEED_ENTRY_PATH = "/api/v1/feedentry/"
 }

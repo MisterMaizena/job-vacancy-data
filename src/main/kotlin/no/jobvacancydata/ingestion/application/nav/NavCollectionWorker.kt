@@ -2,6 +2,7 @@ package no.jobvacancydata.ingestion.application.nav
 
 import no.jobvacancydata.ingestion.client.nav.NavFeedClient
 import no.jobvacancydata.ingestion.client.nav.NavFeedException
+import no.jobvacancydata.ingestion.client.nav.NavFeedInvalidDetailUrlException
 import no.jobvacancydata.ingestion.client.nav.NavFeedMalformedResponseException
 import no.jobvacancydata.ingestion.client.nav.NavFeedPageWalkOutcome
 import no.jobvacancydata.ingestion.client.nav.NavFeedPageWalker
@@ -10,11 +11,11 @@ import no.jobvacancydata.ingestion.client.nav.NavFeedRetryableException
 import no.jobvacancydata.ingestion.client.nav.NavFeedUnauthorizedException
 
 /**
- * Non-persistent NAV collection flow: walks feed pages from an optional cursor and
+ * NAV collection flow: walks feed pages from an optional cursor and
  * retrieves each item's vacancy detail. Per-item failures become explicit outcomes;
  * source-wide failures (authorization, rate limiting, unrecoverable page fetch) abort
- * the run and keep what was collected. Persistence and durable checkpoints are a later
- * stage, so an aborted run's resume cursor is a hint, not a saved checkpoint.
+ * the run and keep what was collected. Persistence and durable checkpoints will be integrated
+ * at a later stage.
  */
 class NavCollectionWorker(
 	private val client: NavFeedClient,
@@ -61,10 +62,11 @@ class NavCollectionWorker(
 			throw exception
 		} catch (exception: NavFeedRateLimitedException) {
 			throw exception
+		} catch (exception: NavFeedInvalidDetailUrlException) {
+			NavItemOutcome.Invalid(item, exception.message ?: "NAV detail URL is invalid")
 		} catch (exception: NavFeedRetryableException) {
 			NavItemOutcome.Failed(item, "NAV detail lookup failed after bounded retries")
 		} catch (exception: NavFeedMalformedResponseException) {
-			// Mapping reports carry field paths and expected types, never response values.
 			NavItemOutcome.Invalid(item, exception.message ?: "NAV detail response failed validation")
 		} catch (exception: NavFeedException) {
 			NavItemOutcome.Failed(item, "NAV detail lookup failed (${exception.javaClass.simpleName})")

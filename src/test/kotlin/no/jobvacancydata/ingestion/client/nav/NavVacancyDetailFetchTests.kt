@@ -132,19 +132,35 @@ class NavVacancyDetailFetchTests {
 	}
 
 	@Test
-	fun `exposes retry-after for rate limited response without retrying`() {
+	fun `retries rate limited detail after retry-after`() {
 		val builder = RestClient.builder()
 		val server = MockRestServiceServer.bindTo(builder).build()
 		val client = createClient(builder.build())
 
 		server.expect(requestTo(DETAIL_URL))
-			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "5"))
+			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "0"))
+		server.expect(requestTo(DETAIL_URL))
+			.andRespond(withSuccess(detailJson(ENTRY_ID), MediaType.APPLICATION_JSON))
+
+		assertThat(client.fetchVacancyDetail(DETAIL_URL))
+			.isInstanceOf(VacancyDetailFetchResult.Fetched::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `defers rate limit when retry-after exceeds in-run wait bound`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo(DETAIL_URL))
+			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "31"))
 
 		val exception = assertThrows<NavFeedRateLimitedException> {
 			client.fetchVacancyDetail(DETAIL_URL)
 		}
 
-		assertThat(exception.retryAfter).isEqualTo("5")
+		assertThat(exception.retryAfter).isEqualTo("31")
 		server.verify()
 	}
 
@@ -170,32 +186,32 @@ class NavVacancyDetailFetchTests {
 	fun `rejects cross-origin detail url`() {
 		val client = createClient(RestClient.builder().build())
 
-		val exception = assertThrows<IllegalArgumentException> {
+		val exception = assertThrows<NavFeedInvalidDetailUrlException> {
 			client.fetchVacancyDetail("https://evil.test${NavFeedPaths.FEED_ENTRY_PATH}$ENTRY_ID")
 		}
 
-		assertThat(exception.message).contains("origin")
+		assertThat(exception.message).doesNotContain("evil.test")
 	}
 
 	@Test
 	fun `rejects detail url outside feed entry path`() {
 		val client = createClient(RestClient.builder().build())
 
-		val exception = assertThrows<IllegalArgumentException> {
+		val exception = assertThrows<NavFeedInvalidDetailUrlException> {
 			client.fetchVacancyDetail("$TEST_BASE_URL${NavFeedPaths.FEED_PATH}/$ENTRY_ID")
 		}
 
-		assertThat(exception.message).contains(NavFeedPaths.FEED_ENTRY_PATH)
+		assertThat(exception.message).doesNotContain(NavFeedPaths.FEED_PATH)
 	}
 
 	@Test
 	fun `rejects detail url without a single entry id`() {
 		val client = createClient(RestClient.builder().build())
 
-		assertThrows<IllegalArgumentException> {
+		assertThrows<NavFeedInvalidDetailUrlException> {
 			client.fetchVacancyDetail("$TEST_BASE_URL${NavFeedPaths.FEED_ENTRY_PATH}")
 		}
-		assertThrows<IllegalArgumentException> {
+		assertThrows<NavFeedInvalidDetailUrlException> {
 			client.fetchVacancyDetail("$TEST_BASE_URL${NavFeedPaths.FEED_ENTRY_PATH}$ENTRY_ID/extra")
 		}
 	}

@@ -1,13 +1,12 @@
 package no.jobvacancydata.ingestion.client.nav
 
+import java.io.IOException
 import java.net.URI
 import java.time.Duration
-import java.util.function.Supplier
-import io.github.resilience4j.retry.Retry
-import io.github.resilience4j.retry.RetryConfig
 import no.jobvacancydata.ingestion.application.nav.FeedFetchResult
 import no.jobvacancydata.ingestion.application.nav.FeedPageCursor
 import no.jobvacancydata.ingestion.application.nav.VacancyDetailFetchResult
+import no.jobvacancydata.ingestion.client.RetryAfter
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
@@ -25,22 +24,13 @@ class NavFeedRestClient(
 ) : NavFeedClient {
 
 	private val baseUri: URI = parseBaseUrl(baseUrl)
-	private val feedRetry = newRetry("nav-feed", retryMaxAttempts, retryWaitDuration)
-	private val detailRetry = newRetry("nav-vacancy-detail", retryMaxAttempts, retryWaitDuration)
+	private val retryPolicy = NavRetryPolicy(retryMaxAttempts, retryWaitDuration)
 
-	/**
-	 * Fetches one page. Transport and retryable server failures are retried;
-	 * mapping failures propagate to the caller without retry.
-	 */
 	override fun fetchPage(cursor: FeedPageCursor?): FeedFetchResult =
-		Retry.decorateSupplier(feedRetry, Supplier { fetchPageOnce(cursor) }).get()
+		retryPolicy.execute { fetchPageOnce(cursor) }
 
-	/**
-	 * Fetches the vacancy detail a feed item's url points to. Transport and retryable
-	 * server failures are retried; mapping and identity failures propagate without retry.
-	 */
 	override fun fetchVacancyDetail(detailUrl: String): VacancyDetailFetchResult =
-		Retry.decorateSupplier(detailRetry, Supplier { fetchVacancyDetailOnce(detailUrl) }).get()
+		retryPolicy.execute { fetchVacancyDetailOnce(detailUrl) }
 
 	private fun fetchPageOnce(cursor: FeedPageCursor?): FeedFetchResult {
 		val targetUrl = cursor?.let { validateFeedUrl(it.url) } ?: initialFeedUrl()
@@ -82,8 +72,8 @@ class NavFeedRestClient(
 		val targetUrl = validateDetailUrl(detailUrl)
 
 		val response = restClient.get().uri(targetUrl).retrieve()
-			// 404 is a documented detail outcome, so it is claimed here (without throwing)
-			// before the generic error handler, and mapped to NotFound below.
+			// 404 is an expected outcome. This empty handler stops RestClient from throwing
+			// so the status can be mapped to NotFound below.
 			.onStatus({ it.isSameCodeAs(HttpStatus.NOT_FOUND) }) { _, _ -> }
 			.onStatus({ it.isError }) { _, clientResponse ->
 				throwForErrorStatus(clientResponse.statusCode, clientResponse.headers, "NAV vacancy detail")
@@ -107,22 +97,7 @@ class NavFeedRestClient(
 		}
 	}
 
-	private fun newRetry(
-		name: String,
-		retryMaxAttempts: Int,
-		retryWaitDuration: Duration,
-	): Retry = Retry.of(
-		name,
-		RetryConfig.custom<Any>()
-			.maxAttempts(retryMaxAttempts)
-			.waitDuration(retryWaitDuration)
-			.retryOnException { exception ->
-				exception is ResourceAccessException || exception is NavFeedRetryableException
-			}
-			.build(),
-	)
-
-	/** Maps an error status to the failure type the caller must handle; never returns. */
+	// Maps an error status to the failure type the caller must handle
 	private fun throwForErrorStatus(
 		statusCode: HttpStatusCode,
 		headers: HttpHeaders,
@@ -150,7 +125,7 @@ class NavFeedRestClient(
 		}
 	}
 
-	/** The returned entry identity must match the requested URL's entry ID; never guess a match. */
+	// The returned entry identity must match the requested URL's entry ID
 	private fun verifyDetailIdentity(targetUrl: String, responseUuid: String) {
 		val entryId = URI.create(targetUrl).path.removePrefix(NavFeedPaths.FEED_ENTRY_PATH)
 		if (!entryId.equals(responseUuid, ignoreCase = true)) {
@@ -171,31 +146,39 @@ class NavFeedRestClient(
 	}
 
 	private fun validateDetailUrl(url: String): String {
-		val uri = URI.create(url)
-		requireSameOrigin(uri, url)
-		require(uri.fragment == null) {
-			"NAV vacancy detail URL must not contain a fragment, got: $url"
+		try {
+			val uri = URI.create(url)
+			requireSameOrigin(uri, url)
+			require(uri.fragment == null) {
+				"NAV vacancy detail URL must not contain a fragment"
+			}
+			val path = uri.path ?: ""
+			require(path.startsWith(NavFeedPaths.FEED_ENTRY_PATH)) {
+				"NAV vacancy detail URL has an unexpected path"
+			}
+			val entryId = path.removePrefix(NavFeedPaths.FEED_ENTRY_PATH)
+			require(entryId.isNotEmpty() && !entryId.contains('/')) {
+				"NAV vacancy detail URL must identify a single feed entry"
+			}
+			return uri.normalize().toString()
+		} catch (exception: IllegalArgumentException) {
+			throw NavFeedInvalidDetailUrlException()
 		}
-		val path = uri.path ?: ""
-		require(path.startsWith(NavFeedPaths.FEED_ENTRY_PATH)) {
-			"NAV vacancy detail URL path must start with ${NavFeedPaths.FEED_ENTRY_PATH}, got: $url"
-		}
-		val entryId = path.removePrefix(NavFeedPaths.FEED_ENTRY_PATH)
-		require(entryId.isNotEmpty() && !entryId.contains('/')) {
-			"NAV vacancy detail URL must identify a single feed entry, got: $url"
-		}
-		return uri.normalize().toString()
 	}
 
 	private fun resolveContinuationUrl(nextUrl: String): String {
-		val nextUri = URI.create(nextUrl)
-		require(nextUri.scheme == null && nextUri.host == null) {
-			"NAV continuation URL must be relative, got: $nextUrl"
+		try {
+			val nextUri = URI.create(nextUrl)
+			require(nextUri.scheme == null && nextUri.host == null) {
+				"NAV continuation URL must be relative"
+			}
+			requireValidFeedUri(nextUri, nextUrl, "NAV continuation")
+			val resolved = baseUri.resolve(nextUri).normalize()
+			requireSameOrigin(resolved, resolved.toString())
+			return resolved.toString()
+		} catch (_: IllegalArgumentException) {
+			throw NavFeedMalformedResponseException("NAV feed response contains an invalid continuation URL")
 		}
-		requireValidFeedUri(nextUri, nextUrl, "NAV continuation")
-		val resolved = baseUri.resolve(nextUri).normalize()
-		requireSameOrigin(resolved, resolved.toString())
-		return resolved.toString()
 	}
 
 	private fun requireSameOrigin(uri: URI, url: String) {
@@ -227,5 +210,52 @@ class NavFeedRestClient(
 			"NAV feed base URL must have a host: $baseUrl"
 		}
 		return uri
+	}
+}
+
+private class NavRetryPolicy(
+	private val maxAttempts: Int,
+	private val waitDuration: Duration,
+) {
+	fun <T> execute(action: () -> T): T {
+		var attempt = 1
+		var accumulatedRateLimitWait = Duration.ZERO
+		while (true) {
+			try {
+				return action()
+			} catch (exception: NavFeedRateLimitedException) {
+				if (attempt >= maxAttempts) throw exception
+				val serverDelay = RetryAfter.delay(exception.retryAfter)
+				val delay = maxOf(waitDuration, serverDelay ?: waitDuration)
+				// If this wait would exceed the 30-second limit, stop rather than retry before NAV's requested time.
+				if (delay > MAX_RATE_LIMIT_WAIT - accumulatedRateLimitWait) throw exception
+				accumulatedRateLimitWait += delay
+				sleep(delay)
+			} catch (exception: ResourceAccessException) {
+				if (attempt >= maxAttempts) throw exception
+				sleep(waitDuration)
+			} catch (exception: NavFeedRetryableException) {
+				if (attempt >= maxAttempts) throw exception
+				sleep(waitDuration)
+			}
+			attempt++
+		}
+	}
+
+	private fun sleep(duration: Duration) {
+		try {
+			Thread.sleep(duration.toMillis())
+		} catch (exception: InterruptedException) {
+			Thread.currentThread().interrupt()
+			throw ResourceAccessException(
+				"Interrupted while waiting to retry a NAV request",
+				IOException(exception),
+			)
+		}
+	}
+
+	// Declared in-file since it's fixed policy for this specific retry logic
+	private companion object {
+		private val MAX_RATE_LIMIT_WAIT: Duration = Duration.ofSeconds(30)
 	}
 }

@@ -8,10 +8,9 @@ import no.jobvacancydata.ingestion.application.nav.NavCollectionWorker
 import no.jobvacancydata.ingestion.application.nav.NavItemOutcome
 
 /**
- * Convenience flow connecting NAV collection and BRREG enrichment for one run: every
- * distinct employer organization number in the collected vacancies is enriched. Both
- * stages remain independently callable through their own workers, and nothing is
- * persisted — the outcome is for a later persistence layer to consume.
+ * Flow connecting NAV collection and BRREG enrichment for one run: every
+ * distinct organization number in the collected vacancies is enriched. Both
+ * stages remain independently callable through their own workers.
  */
 class VacancyIngestionWorker(
 	private val navCollectionWorker: NavCollectionWorker,

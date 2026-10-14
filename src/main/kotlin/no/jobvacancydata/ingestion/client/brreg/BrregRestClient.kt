@@ -1,7 +1,9 @@
 package no.jobvacancydata.ingestion.client.brreg
 
+import java.io.IOException
 import java.net.URI
 import java.time.Duration
+import no.jobvacancydata.ingestion.client.RetryAfter
 import no.jobvacancydata.ingestion.application.brreg.BrregLookupResult
 import no.jobvacancydata.ingestion.application.brreg.BrregOrganizationLookup
 import no.jobvacancydata.ingestion.application.brreg.BrregOrganizationRecord
@@ -25,17 +27,14 @@ class BrregRestClient(
 	private val baseUri = URI.create(baseUrl.trimEnd('/'))
 	private val retryPolicy = BrregRetryPolicy(retryMaxAttempts, retryWaitDuration)
 
-	/** Validates and batches IDs, then returns each ID's main-entity and subunit outcomes. */
+	// Validates and batches IDs, then returns each ID's main-entity and subunit outcomes.
 	override fun lookup(organizationNumbers: Collection<String>): List<BrregOrganizationLookup> {
 		val ids = organizationNumbers.toSortedSet()
 		if (ids.isEmpty()) return emptyList()
-		require(ids.all { BrregApiContract.ORGANIZATION_NUMBER_REGEX.matches(it) }) {
-			"BRREG organization numbers must contain exactly nine digits"
-		}
 		return partitionBrregOrganizationNumbers(ids).flatMap(::lookupBatch)
 	}
 
-	/** Searches both registers, then detail-checks each ID a completed search did not return. */
+	// Searches both registers, then detail-checks each ID which a completed search did not return.
 	private fun lookupBatch(ids: List<String>): List<BrregOrganizationLookup> {
 		val mainSearch = searchRegister(ids, BrregApiContract.MAIN_ENTITY_PATH, ENHETER_KEY, mapper::mapMainEntity)
 		val subunitSearch = searchRegister(ids, BrregApiContract.SUBUNIT_PATH, UNDERENHETER_KEY, mapper::mapSubunit)
@@ -50,12 +49,7 @@ class BrregRestClient(
 		}
 	}
 
-	/**
-	 * Searches one register across all pages and resolves each requested ID it returns.
-	 * An invalid record is rejected alone when its organization number is readable; any
-	 * other failure stops the search and leaves unresolved IDs pending with their valid
-	 * peers preserved — never treated as no-match.
-	 */
+	// Searches one register across all pages and resolves each requested ID it returns.
 	private fun searchRegister(
 		ids: Collection<String>,
 		path: String,
@@ -95,7 +89,6 @@ class BrregRestClient(
 		val record = try {
 			mapRecord(objectMapper.writeValueAsString(item))
 		} catch (exception: BrregRecordMappingException) {
-			// An attributable record is rejected alone; anything else makes the page untrustworthy.
 			if (rawOrganizationNumber != null && rawOrganizationNumber in ids) {
 				outcomes[rawOrganizationNumber] =
 					BrregLookupResult.Invalid(exception.report.message(SOURCE_NAME))
@@ -140,7 +133,8 @@ class BrregRestClient(
 		return nextHref?.takeIf(JsonNode::isString)?.asString()
 	}
 
-	/** Called only when a search completed without the ID: 200 maps a record, 410 a removed one. */
+	// If a completed search omits the organization number, check the detail endpoint:
+	// 200 returns a record, 404 means no record exists, and 410 may return a removed record.
 	private fun fetchDetailOutcome(
 		id: String,
 		path: String,
@@ -180,7 +174,7 @@ class BrregRestClient(
 		}
 	}
 
-	/** Rejects pagination links that leave the configured origin or the selected search endpoints. */
+	// Reject pagination links outside the configured origin or selected search endpoints.
 	private fun validatePageUrl(url: String): String {
 		val uri = try {
 			URI.create(url)
@@ -200,7 +194,7 @@ class BrregRestClient(
 		return uri.toString()
 	}
 
-	/** Failure reasons carry the failure kind, never response content. */
+	// Failure reasons carry the failure kind, never response content.
 	private fun searchFailureReason(exception: Exception): String = when (exception) {
 		is BrregSearchFailedException -> exception.message!!
 		is RestClientResponseException -> "BRREG search failed with HTTP ${exception.statusCode.value()}"
@@ -221,30 +215,27 @@ class BrregRestClient(
 	}
 }
 
-/** Per-register search result: resolved outcomes plus why unresolved IDs must stay pending. */
+// Per-register search result: resolved outcomes plus why unresolved IDs must stay pending.
 private class RegisterSearch(
 	private val outcomes: Map<String, BrregLookupResult>,
 	private val failureReason: String?,
 ) {
-	/** The search outcome for one ID, or null to fall back to the detail endpoint. */
+	// Null means the search completed without this ID; fall back to the detail endpoint.
 	fun outcomeFor(id: String): BrregLookupResult? =
 		outcomes[id] ?: failureReason?.let(BrregLookupResult::Failed)
 }
 
-/** Internal marker for a search page that cannot be trusted or completed. */
+// Internal marker for a search page that cannot be trusted or completed.
 private class BrregSearchFailedException(message: String) : RuntimeException(message)
 
-/**
- * Bounded blocking retries for BRREG requests. Transport failures, server errors, and
- * rate limiting are retried; a 429 waits at least the server's Retry-After hint (capped),
- * which Resilience4j's fixed-wait Retry cannot express.
- */
+// Retries BRREG requests a limited number of times and caps total rate-limit waiting at "waitDuration"
 private class BrregRetryPolicy(
 	private val maxAttempts: Int,
 	private val waitDuration: Duration,
 ) {
 	fun <T> execute(action: () -> T): T {
 		var attempt = 1
+		var accumulatedRateLimitWait = Duration.ZERO
 		while (true) {
 			try {
 				return action()
@@ -255,18 +246,27 @@ private class BrregRetryPolicy(
 				val retryable = exception.statusCode.is5xxServerError ||
 					exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)
 				if (!retryable || attempt >= maxAttempts) throw exception
-				sleep(maxOf(waitDuration, retryAfterHint(exception)))
+				val serverDelay = retryAfterHint(exception)
+				val delay = maxOf(waitDuration, serverDelay ?: waitDuration)
+				// If this wait would exceed the 30-second limit, stop rather than retry before BRREG's requested time.
+				if (exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS) &&
+					delay > MAX_RETRY_AFTER_WAIT - accumulatedRateLimitWait
+				) throw exception
+				if (exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)) {
+					accumulatedRateLimitWait += delay
+				}
+				sleep(delay)
 			}
 			attempt++
 		}
 	}
 
-	private fun retryAfterHint(exception: RestClientResponseException): Duration {
-		if (!exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)) return Duration.ZERO
-		val seconds = exception.responseHeaders?.getFirst("Retry-After")?.toLongOrNull()
-			?: return Duration.ZERO
-		return Duration.ofSeconds(seconds.coerceAtMost(MAX_RETRY_AFTER_SECONDS))
-	}
+	private fun retryAfterHint(exception: RestClientResponseException): Duration? =
+		if (exception.statusCode.isSameCodeAs(HttpStatus.TOO_MANY_REQUESTS)) {
+			RetryAfter.delay(exception.responseHeaders?.getFirst("Retry-After"))
+		} else {
+			null
+		}
 
 	private fun sleep(duration: Duration) {
 		try {
@@ -275,13 +275,13 @@ private class BrregRetryPolicy(
 			Thread.currentThread().interrupt()
 			throw ResourceAccessException(
 				"Interrupted while waiting to retry a BRREG request",
-				java.io.IOException(exception),
+				IOException(exception),
 			)
 		}
 	}
 
+	// Declared in-file since it's fixed policy for this specific retry logic
 	private companion object {
-		// Bounds the wait so a large Retry-After hint cannot stall a worker run.
-		private const val MAX_RETRY_AFTER_SECONDS = 30L
+		private val MAX_RETRY_AFTER_WAIT: Duration = Duration.ofSeconds(30)
 	}
 }

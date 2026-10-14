@@ -1,8 +1,8 @@
 package no.jobvacancydata.ingestion.application.nav
 
 /**
- * Result of one non-persistent NAV collection run. Structured so a future
- * persistence layer can consume collected items and resume from the cursor.
+ * Result of one non-persistent NAV collection run. Intended for a future
+ * persistence layer to consume collected items and resume from the cursor.
  */
 data class NavCollectionOutcome(
 	val completion: NavCollectionCompletion,
@@ -39,7 +39,7 @@ sealed interface NavItemOutcome {
 		val detail: VacancyDetailResponse,
 	) : NavItemOutcome
 
-	/** NAV returned its documented 404 for the feed item's detail URL. */
+	/** NAV returned 404 for the feed item's detail URL. */
 	data class DetailNotFound(override val feedItem: FeedItem) : NavItemOutcome
 
 	/** Detail lookup failed after bounded retries; the item remains pending. */
@@ -48,7 +48,8 @@ sealed interface NavItemOutcome {
 		val reason: String,
 	) : NavItemOutcome
 
-	/** The detail response failed validation or identity verification; needs review. */
+	// TODO: Iron out how to deal with this properly
+	/** The detail response failed validation or identity verification; needs handling or review. */
 	data class Invalid(
 		override val feedItem: FeedItem,
 		val reason: String,

@@ -10,7 +10,7 @@ interface NavFeedClient {
 
 	/**
 	 * Fetches the vacancy detail a feed item's url points to.
-	 * NAV's documented 404 returns [VacancyDetailFetchResult.NotFound]; any other
+	 * 404 returns [VacancyDetailFetchResult.NotFound]; any other
 	 * failure throws a [NavFeedException] subtype.
 	 */
 	fun fetchVacancyDetail(detailUrl: String): VacancyDetailFetchResult

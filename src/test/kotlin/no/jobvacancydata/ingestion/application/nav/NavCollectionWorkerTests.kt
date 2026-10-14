@@ -2,6 +2,7 @@ package no.jobvacancydata.ingestion.application.nav
 
 import java.time.OffsetDateTime
 import no.jobvacancydata.ingestion.client.nav.NavFeedClient
+import no.jobvacancydata.ingestion.client.nav.NavFeedInvalidDetailUrlException
 import no.jobvacancydata.ingestion.client.nav.NavFeedMappingException
 import no.jobvacancydata.ingestion.client.nav.NavFeedRateLimitedException
 import no.jobvacancydata.ingestion.client.nav.NavFeedRetryableException
@@ -79,6 +80,25 @@ class NavCollectionWorkerTests {
 		assertThat(byId.getValue(failed.id)).isInstanceOf(NavItemOutcome.Failed::class.java)
 		val invalidOutcome = byId.getValue(invalid.id) as NavItemOutcome.Invalid
 		assertThat(invalidOutcome.reason).contains("$.title")
+	}
+
+	@Test
+	fun `classifies an invalid detail url as an invalid item and continues`() {
+		val invalid = feedItem("synthetic-invalid-url")
+		val valid = feedItem("synthetic-valid-url")
+		val client = StubNavFeedClient(
+			pages = listOf({ pageResult(PAGE_ONE_URL, null, listOf(invalid, valid)) }),
+			details = mapOf(
+				invalid.url to { throw NavFeedInvalidDetailUrlException() },
+				valid.url to { fetched(valid.id) },
+			),
+		)
+
+		val outcome = NavCollectionWorker(client).collect()
+
+		assertThat(outcome.completion).isEqualTo(NavCollectionCompletion.ReachedTail)
+		assertThat(outcome.items[0]).isInstanceOf(NavItemOutcome.Invalid::class.java)
+		assertThat(outcome.items[1]).isInstanceOf(NavItemOutcome.Collected::class.java)
 	}
 
 	@Test

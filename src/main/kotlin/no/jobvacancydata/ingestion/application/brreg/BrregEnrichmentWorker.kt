@@ -1,24 +1,19 @@
 package no.jobvacancydata.ingestion.application.brreg
 
-import no.jobvacancydata.ingestion.client.brreg.BrregApiContract
 import no.jobvacancydata.ingestion.client.brreg.BrregRegistryClient
 
 /**
- * Non-persistent BRREG enrichment flow: resolves each organization number against the
+ * BRREG enrichment flow: resolves each organization number against the
  * main-entity and subunit registers and derives one explicit status per organization.
- * Lookup uses exact organization-number identity only; malformed IDs are reported as
- * rejected rather than guessed at, and failures never discard valid results.
+ * Lookup uses exact organization-number identity only.
  */
 class BrregEnrichmentWorker(
 	private val client: BrregRegistryClient,
 ) {
 	fun enrich(organizationNumbers: Collection<String>): BrregEnrichmentOutcome {
-		val (wellFormed, rejected) = organizationNumbers
-			.partition { BrregApiContract.ORGANIZATION_NUMBER_REGEX.matches(it) }
-		val lookups = client.lookup(wellFormed.distinct())
+		val lookups = client.lookup(organizationNumbers.distinct())
 		return BrregEnrichmentOutcome(
 			organizations = lookups.map(::toEnrichment),
-			rejectedOrganizationNumbers = rejected.distinct(),
 		)
 	}
 

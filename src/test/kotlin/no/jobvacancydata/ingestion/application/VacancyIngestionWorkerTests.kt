@@ -52,11 +52,11 @@ class VacancyIngestionWorkerTests {
 
 		assertThat(outcome.nav.completion).isEqualTo(NavCollectionCompletion.ReachedTail)
 		assertThat(outcome.nav.items).hasSize(3)
-		assertThat(brregClient.requested).containsExactly(ORG_NUMBER)
-		val enrichment = outcome.enrichment.organizations.single()
+		assertThat(brregClient.requested).containsExactly(ORG_NUMBER, "not-nine-digits")
+		assertThat(outcome.enrichment.organizations).hasSize(2)
+		val enrichment = outcome.enrichment.organizations.first()
 		assertThat(enrichment.organizationNumber).isEqualTo(ORG_NUMBER)
 		assertThat(enrichment.status).isEqualTo(BrregEnrichmentStatus.ENRICHED)
-		assertThat(outcome.enrichment.rejectedOrganizationNumbers).containsExactly("not-nine-digits")
 	}
 
 	private fun detail(entryId: String, orgNumber: String?): VacancyDetailFetchResult =

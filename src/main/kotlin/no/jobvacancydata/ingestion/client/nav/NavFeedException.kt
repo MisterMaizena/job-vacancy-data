@@ -16,6 +16,10 @@ class NavFeedRateLimitedException(
 	val retryAfter: String?,
 ) : NavFeedException("NAV feed rate limited")
 
+/** A feed item points to an invalid or disallowed detail URL. */
+class NavFeedInvalidDetailUrlException :
+	NavFeedException("NAV feed item contains an invalid detail URL")
+
 /** The requested feed resource is unavailable. */
 class NavFeedUnavailableException :
 	NavFeedException("NAV feed page unavailable")
@@ -27,8 +31,8 @@ open class NavFeedMalformedResponseException(
 ) : NavFeedException(message, cause)
 
 /**
- * The returned detail identity does not match the requested feed entry.
- * This is a data-integrity failure: never substitute or guess another record.
+ * The detail response's UUID does not match the UUID in the requested feed-entry URL.
+ * Data-integrity failure: do not use the response for that feed entry.
  */
 class NavFeedIdentityMismatchException(message: String) :
 	NavFeedMalformedResponseException(message)

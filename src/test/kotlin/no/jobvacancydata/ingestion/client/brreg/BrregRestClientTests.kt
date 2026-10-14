@@ -5,7 +5,6 @@ import no.jobvacancydata.ingestion.application.brreg.BrregLifecycleStatus
 import no.jobvacancydata.ingestion.application.brreg.BrregLookupResult
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.assertThrows
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.web.client.MockRestServiceServer
@@ -36,13 +35,25 @@ class BrregRestClientTests {
 	}
 
 	@Test
-	fun `returns empty list for empty input and rejects malformed organization numbers`() {
-		val client = createClient(RestClient.builder().build())
+	fun `passes organization number to BRREG and reports its rejection as a failed lookup`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val organizationNumber = "not-nine-digits"
 
 		assertThat(client.lookup(emptyList())).isEmpty()
-		assertThrows<IllegalArgumentException> {
-			client.lookup(listOf("not-nine-digits"))
-		}
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$organizationNumber"))
+			.andRespond(withStatus(HttpStatus.BAD_REQUEST))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$organizationNumber"))
+			.andRespond(withStatus(HttpStatus.BAD_REQUEST))
+
+		val result = client.lookup(listOf(organizationNumber)).single()
+
+		assertThat(result.organizationNumber).isEqualTo(organizationNumber)
+		assertThat(result.mainEntity).isInstanceOf(BrregLookupResult.Failed::class.java)
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.Failed::class.java)
+		server.verify()
 	}
 
 	@Test

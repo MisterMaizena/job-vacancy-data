@@ -3,8 +3,6 @@ package no.jobvacancydata.ingestion.application.brreg
 /** Result of one non-persistent BRREG enrichment run. */
 data class BrregEnrichmentOutcome(
 	val organizations: List<BrregOrganizationEnrichment>,
-	/** IDs that are not nine digits and were never sent to BRREG; visible instead of dropped. */
-	val rejectedOrganizationNumbers: List<String>,
 )
 
 data class BrregOrganizationEnrichment(
@@ -19,14 +17,16 @@ enum class BrregEnrichmentStatus {
 	ENRICHED,
 
 	/**
-	 * Both registers confirmed no record. This is unexpected for a NAV-referenced
-	 * organization number, so it is an explicit outcome, not a successful match.
+	 * Both registers confirmed no record. This is unexpected, as a resource should be found considering
+	 * all Orgs need an Org.Nr, and we have that from NAV.
+	 *
 	 */
 	NOT_FOUND,
 
 	/** A register lookup did not complete; enrichment remains pending. */
 	FAILED,
 
+	// TODO: Iron out how to deal with this properly
 	/** A returned record failed validation and needs review. */
 	INVALID,
 }

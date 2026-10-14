@@ -34,7 +34,6 @@ class BrregEnrichmentWorkerTests {
 		val outcome = BrregEnrichmentWorker(client)
 			.enrich(listOf(ORG_ENRICHED, ORG_NOT_FOUND, ORG_FAILED, ORG_INVALID))
 
-		assertThat(outcome.rejectedOrganizationNumbers).isEmpty()
 		val byNumber = outcome.organizations.associateBy { it.organizationNumber }
 		assertThat(byNumber.getValue(ORG_ENRICHED).status).isEqualTo(BrregEnrichmentStatus.ENRICHED)
 		assertThat(byNumber.getValue(ORG_NOT_FOUND).status).isEqualTo(BrregEnrichmentStatus.NOT_FOUND)
@@ -45,14 +44,21 @@ class BrregEnrichmentWorkerTests {
 	}
 
 	@Test
-	fun `rejects malformed organization numbers without sending them to BRREG`() {
-		val client = StubBrregRegistryClient(emptyList())
+	fun `sends organization numbers to BRREG without local format rejection`() {
+		val organizationNumber = "not-nine-digits"
+		val failedLookup = BrregOrganizationLookup(
+			organizationNumber = organizationNumber,
+			mainEntity = BrregLookupResult.Failed("BRREG search failed with HTTP 400"),
+			subunit = BrregLookupResult.Failed("BRREG search failed with HTTP 400"),
+		)
+		val client = StubBrregRegistryClient(listOf(failedLookup))
 
 		val outcome = BrregEnrichmentWorker(client)
-			.enrich(listOf("not-nine-digits", ORG_ENRICHED, ORG_ENRICHED))
+			.enrich(listOf(organizationNumber))
 
-		assertThat(client.requested).containsExactly(ORG_ENRICHED)
-		assertThat(outcome.rejectedOrganizationNumbers).containsExactly("not-nine-digits")
+		assertThat(client.requested).containsExactly(organizationNumber)
+		assertThat(outcome.organizations.single().organizationNumber).isEqualTo(organizationNumber)
+		assertThat(outcome.organizations.single().status).isEqualTo(BrregEnrichmentStatus.FAILED)
 	}
 
 	private fun record(organizationNumber: String): BrregOrganizationRecord =
