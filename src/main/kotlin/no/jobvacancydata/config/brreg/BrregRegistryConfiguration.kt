@@ -1,6 +1,7 @@
 package no.jobvacancydata.config.brreg
 
 import java.net.http.HttpClient
+import no.jobvacancydata.ingestion.application.brreg.BrregEnrichmentWorker
 import no.jobvacancydata.ingestion.client.brreg.BrregRecordMapper
 import no.jobvacancydata.ingestion.client.brreg.BrregRestClient
 import no.jobvacancydata.ingestion.client.brreg.BrregRegistryClient
@@ -31,4 +32,8 @@ class BrregRegistryConfiguration {
 		retryMaxAttempts = properties.retryMaxAttempts,
 		retryWaitDuration = properties.retryWaitDuration,
 	)
+
+	@Bean
+	fun brregEnrichmentWorker(client: BrregRegistryClient): BrregEnrichmentWorker =
+		BrregEnrichmentWorker(client)
 }

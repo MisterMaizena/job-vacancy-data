@@ -42,10 +42,8 @@ class BrregRecordMapper(
 			currentShape = SUBUNIT_SHAPE,
 		)
 
-	/**
-	 * Checks response class and lifecycle status, validates allowed fields, and creates a record  if validation succeeds
-	 * Field errors are collected before throwing, so no record is returned when any field is invalid.
-	 */
+	// Check response class and lifecycle status, then validate allowed fields before building a record.
+	// Collect field errors before throwing; invalid cases never produces a partial record.
 	private fun mapRecord(
 		json: String,
 		type: BrregRecordType,
@@ -107,7 +105,7 @@ class BrregRecordMapper(
 			BrregLifecycleStatus.DELETED -> DELETED_SHAPE
 			BrregLifecycleStatus.GONE -> GONE_SHAPE
 		}
-		// Copy only allowed fields into a temporary object; discard it if validation fails.
+
 		val fields = validateAndCopyAllowedFields(root, "$", shape, errors) as ObjectNode
 		if (lifecycleStatus != BrregLifecycleStatus.GONE &&
 			responseClassNode?.isString == true
@@ -128,10 +126,8 @@ class BrregRecordMapper(
 		)
 	}
 
-	/**
-	 * Checks a node against its shape and copies only allowed fields.
-	 * A bad node records an error; other fields and array items in the parent are still checked.
-	 */
+	// Check a node against its shape and copy only allowed fields. Record invalid nodes,
+	// but continue checking sibling fields and array items.
 	private fun validateAndCopyAllowedFields(
 		node: JsonNode,
 		path: String,

@@ -13,6 +13,7 @@ import org.springframework.test.web.client.response.MockRestResponseCreators.wit
 import org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess
 import org.springframework.web.client.RestClient
 import tools.jackson.databind.json.JsonMapper
+import tools.jackson.databind.node.ObjectNode
 
 class BrregRestClientTests {
 	private val objectMapper = JsonMapper.builder().build()
@@ -34,22 +35,44 @@ class BrregRestClientTests {
 	}
 
 	@Test
+	fun `passes organization number to BRREG and reports its rejection as a failed lookup`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val organizationNumber = "not-nine-digits"
+
+		assertThat(client.lookup(emptyList())).isEmpty()
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$organizationNumber"))
+			.andRespond(withStatus(HttpStatus.BAD_REQUEST))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$organizationNumber"))
+			.andRespond(withStatus(HttpStatus.BAD_REQUEST))
+
+		val result = client.lookup(listOf(organizationNumber)).single()
+
+		assertThat(result.organizationNumber).isEqualTo(organizationNumber)
+		assertThat(result.mainEntity).isInstanceOf(BrregLookupResult.Failed::class.java)
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.Failed::class.java)
+		server.verify()
+	}
+
+	@Test
 	fun `looks up one organization across both registers and resolves missing register record by detail`() {
 		val builder = RestClient.builder()
 		val server = MockRestServiceServer.bindTo(builder).build()
 		val client = createClient(builder.build())
 
 		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("enheter", mainEntity()), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("enheter", listOf(mainEntity(ORG_NUMBER))), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("underenheter", null), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
 			.andRespond(withStatus(HttpStatus.NOT_FOUND))
 
 		val result = client.lookup(listOf(ORG_NUMBER)).single()
 
 		assertThat(result.mainEntity).isInstanceOf(BrregLookupResult.Found::class.java)
-		assertThat((result.subunit as BrregLookupResult.NotFound)).isNotNull
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
 		server.verify()
 	}
 
@@ -61,11 +84,11 @@ class BrregRestClientTests {
 		val nextUrl = "$BASE/api/enheter?page=1&size=20&organisasjonsnummer=$ORG_NUMBER"
 
 		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("enheter", null, nextUrl), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList(), nextUrl), MediaType.APPLICATION_JSON))
 		server.expect(requestTo(nextUrl))
-			.andRespond(withSuccess(searchResponse("enheter", null), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList()), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("underenheter", subunit()), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("underenheter", listOf(subunit(ORG_NUMBER))), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
 			.andRespond(withSuccess(deletedMainEntity(), MediaType.APPLICATION_JSON))
 
@@ -84,9 +107,9 @@ class BrregRestClientTests {
 		val client = createClient(builder.build())
 
 		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("enheter", null), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList()), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
-			.andRespond(withSuccess(searchResponse("underenheter", null), MediaType.APPLICATION_JSON))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
 			.andRespond(withStatus(HttpStatus.GONE).body(goneRecord()).contentType(MediaType.APPLICATION_JSON))
 		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
@@ -100,27 +123,251 @@ class BrregRestClientTests {
 		server.verify()
 	}
 
+	@Test
+	fun `keeps each organization outcome independent within a batch`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val ids = listOf(ORG_NUMBER, OTHER_ORG_NUMBER)
+		val idParam = ids.joinToString(",")
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$idParam"))
+			.andRespond(withSuccess(searchResponse("enheter", listOf(mainEntity(ORG_NUMBER))), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$idParam"))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+		server.expect(requestTo("$BASE/api/enheter/$OTHER_ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+		server.expect(requestTo("$BASE/api/underenheter/$OTHER_ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+
+		val results = client.lookup(ids)
+
+		assertThat(results.map { it.organizationNumber }).containsExactly(ORG_NUMBER, OTHER_ORG_NUMBER)
+		assertThat(results[0].mainEntity).isInstanceOf(BrregLookupResult.Found::class.java)
+		assertThat(results[0].subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		assertThat(results[1].mainEntity).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		assertThat(results[1].subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `failed search leaves unresolved IDs pending and preserves valid peers`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val ids = listOf(ORG_NUMBER, OTHER_ORG_NUMBER)
+		val idParam = ids.joinToString(",")
+		val nextUrl = "$BASE/api/enheter?page=1&organisasjonsnummer=$idParam"
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$idParam"))
+			.andRespond(
+				withSuccess(
+					searchResponse("enheter", listOf(mainEntity(ORG_NUMBER)), nextUrl),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+		repeat(RETRY_TEST_ATTEMPTS) {
+			server.expect(requestTo(nextUrl))
+				.andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE))
+		}
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$idParam"))
+			.andRespond(
+				withSuccess(
+					searchResponse("underenheter", listOf(subunit(ORG_NUMBER), subunit(OTHER_ORG_NUMBER))),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+
+		val results = client.lookup(ids)
+
+		assertThat(results[0].mainEntity).isInstanceOf(BrregLookupResult.Found::class.java)
+		val pending = results[1].mainEntity as BrregLookupResult.Failed
+		assertThat(pending.reason).contains("503")
+		assertThat(results[0].subunit).isInstanceOf(BrregLookupResult.Found::class.java)
+		assertThat(results[1].subunit).isInstanceOf(BrregLookupResult.Found::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `invalid search record is rejected alone while valid peers are kept`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val ids = listOf(ORG_NUMBER, OTHER_ORG_NUMBER)
+		val idParam = ids.joinToString(",")
+		val invalidOther = (objectMapper.readTree(mainEntity(OTHER_ORG_NUMBER)) as ObjectNode)
+			.apply { remove("navn") }
+			.let(objectMapper::writeValueAsString)
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$idParam"))
+			.andRespond(
+				withSuccess(
+					searchResponse("enheter", listOf(mainEntity(ORG_NUMBER), invalidOther)),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$idParam"))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+		server.expect(requestTo("$BASE/api/underenheter/$OTHER_ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+
+		val results = client.lookup(ids)
+
+		assertThat(results[0].mainEntity).isInstanceOf(BrregLookupResult.Found::class.java)
+		assertThat(results[1].mainEntity).isInstanceOf(BrregLookupResult.Invalid::class.java)
+		assertThat(results[0].subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		assertThat(results[1].subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `duplicate search record is an ambiguous data-integrity outcome`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(
+				withSuccess(
+					searchResponse("enheter", listOf(mainEntity(ORG_NUMBER), mainEntity(ORG_NUMBER))),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("underenheter", listOf(subunit(ORG_NUMBER))), MediaType.APPLICATION_JSON))
+
+		val result = client.lookup(listOf(ORG_NUMBER)).single()
+
+		assertThat(result.mainEntity).isInstanceOf(BrregLookupResult.Invalid::class.java)
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.Found::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `unrequested search record fails the search without turning missing IDs into no-match`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+		val ids = listOf(ORG_NUMBER, OTHER_ORG_NUMBER)
+		val idParam = ids.joinToString(",")
+		val unrequested = "599100675"
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$idParam"))
+			.andRespond(
+				withSuccess(
+					searchResponse("enheter", listOf(mainEntity(ORG_NUMBER), mainEntity(unrequested))),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$idParam"))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+		server.expect(requestTo("$BASE/api/underenheter/$OTHER_ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+
+		val results = client.lookup(ids)
+
+		assertThat(results[0].mainEntity).isInstanceOf(BrregLookupResult.Found::class.java)
+		assertThat(results[1].mainEntity).isInstanceOf(BrregLookupResult.Failed::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `failed detail lookup becomes pending and is never a no-match`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("underenheter", listOf(subunit(ORG_NUMBER))), MediaType.APPLICATION_JSON))
+		repeat(RETRY_TEST_ATTEMPTS) {
+			server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
+				.andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE))
+		}
+
+		val result = client.lookup(listOf(ORG_NUMBER)).single()
+
+		val main = result.mainEntity as BrregLookupResult.Failed
+		assertThat(main.reason).contains("503")
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.Found::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `retries rate limited detail honoring retry-after then maps the record`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "0"))
+		server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
+			.andRespond(withSuccess(deletedMainEntity(), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+
+		val result = client.lookup(listOf(ORG_NUMBER)).single()
+
+		assertThat((result.mainEntity as BrregLookupResult.Found).record.lifecycleStatus)
+			.isEqualTo(BrregLifecycleStatus.DELETED)
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		server.verify()
+	}
+
+	@Test
+	fun `invalid detail record is rejected for review`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo("$BASE/api/enheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("enheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter?organisasjonsnummer=$ORG_NUMBER"))
+			.andRespond(withSuccess(searchResponse("underenheter", emptyList()), MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/enheter/$ORG_NUMBER"))
+			.andRespond(withSuccess("""{"organisasjonsnummer":"$ORG_NUMBER"}""", MediaType.APPLICATION_JSON))
+		server.expect(requestTo("$BASE/api/underenheter/$ORG_NUMBER"))
+			.andRespond(withStatus(HttpStatus.NOT_FOUND))
+
+		val result = client.lookup(listOf(ORG_NUMBER)).single()
+
+		assertThat(result.mainEntity).isInstanceOf(BrregLookupResult.Invalid::class.java)
+		assertThat(result.subunit).isInstanceOf(BrregLookupResult.NotFound::class.java)
+		server.verify()
+	}
+
 	private fun createClient(restClient: RestClient) =
 		BrregRestClient(
 			restClient,
 			recordMapper,
 			objectMapper,
 			BASE,
-			retryMaxAttempts = 3,
+			retryMaxAttempts = RETRY_TEST_ATTEMPTS,
 			retryWaitDuration = Duration.ZERO,
 		)
 
-	private fun searchResponse(key: String, item: String?, next: String? = null): String {
-		val entries = item?.let { "[$it]" } ?: "[]"
+	private fun searchResponse(key: String, items: List<String>, next: String? = null): String {
+		val entries = items.joinToString(",", "[", "]")
 		val nextLink = next?.let { "\"href\":\"$it\"" } ?: "\"href\":null"
 		return """{"_embedded":{"$key":$entries},"_links":{"next":{$nextLink}},"page":{"number":0,"size":20,"totalElements":0,"totalPages":1}}"""
 	}
 
-	private fun mainEntity(): String =
-		"""{"respons_klasse":"Enhet","organisasjonsnummer":"$ORG_NUMBER","navn":"Synthetic organization","organisasjonsform":{"kode":"AS","beskrivelse":"Synthetic"},"registrertIMvaregisteret":true,"maalform":"Bokmål","underAvvikling":false,"registrertIStiftelsesregisteret":false,"konkurs":false,"paategninger":[],"registrertIFrivillighetsregisteret":false,"registrertIForetaksregisteret":true,"registreringsdatoEnhetsregisteret":"2020-01-01","underTvangsavviklingEllerTvangsopplosning":false,"harRegistrertAntallAnsatte":true,"erIKonsern":false}"""
+	private fun mainEntity(orgNumber: String): String =
+		"""{"respons_klasse":"Enhet","organisasjonsnummer":"$orgNumber","navn":"Synthetic organization","organisasjonsform":{"kode":"AS","beskrivelse":"Synthetic"},"registrertIMvaregisteret":true,"maalform":"Bokmål","underAvvikling":false,"registrertIStiftelsesregisteret":false,"konkurs":false,"paategninger":[],"registrertIFrivillighetsregisteret":false,"registrertIForetaksregisteret":true,"registreringsdatoEnhetsregisteret":"2020-01-01","underTvangsavviklingEllerTvangsopplosning":false,"harRegistrertAntallAnsatte":true,"erIKonsern":false}"""
 
-	private fun subunit(): String =
-		"""{"respons_klasse":"Underenhet","organisasjonsnummer":"$ORG_NUMBER","navn":"Synthetic subunit","organisasjonsform":{"kode":"BEDR","beskrivelse":"Synthetic"},"registrertIMvaregisteret":false,"registreringsdatoEnhetsregisteret":"2020-01-01","harRegistrertAntallAnsatte":false}"""
+	private fun subunit(orgNumber: String): String =
+		"""{"respons_klasse":"Underenhet","organisasjonsnummer":"$orgNumber","navn":"Synthetic subunit","organisasjonsform":{"kode":"BEDR","beskrivelse":"Synthetic"},"registrertIMvaregisteret":false,"registreringsdatoEnhetsregisteret":"2020-01-01","harRegistrertAntallAnsatte":false}"""
 
 	private fun deletedMainEntity(): String =
 		"""{"respons_klasse":"SlettetEnhet","organisasjonsnummer":"$ORG_NUMBER","navn":"Synthetic deleted","organisasjonsform":{"kode":"AS","beskrivelse":"Synthetic"},"slettedato":"2026-01-01"}"""
@@ -129,7 +376,9 @@ class BrregRestClientTests {
 		"""{"organisasjonsnummer":"$ORG_NUMBER","slettedato":"2026-01-01"}"""
 
 	private companion object {
+		const val RETRY_TEST_ATTEMPTS = 3
 		const val BASE = "https://data.brreg.no/enhetsregisteret"
 		const val ORG_NUMBER = "509100675"
+		const val OTHER_ORG_NUMBER = "509100676"
 	}
 }

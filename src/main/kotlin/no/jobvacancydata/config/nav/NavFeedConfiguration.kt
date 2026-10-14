@@ -2,9 +2,13 @@ package no.jobvacancydata.config.nav
 
 import java.net.http.HttpClient
 import no.jobvacancydata.config.ConditionalOnNavIngestion
+import no.jobvacancydata.ingestion.application.VacancyIngestionWorker
+import no.jobvacancydata.ingestion.application.brreg.BrregEnrichmentWorker
+import no.jobvacancydata.ingestion.application.nav.NavCollectionWorker
 import no.jobvacancydata.ingestion.client.nav.NavFeedClient
 import no.jobvacancydata.ingestion.client.nav.NavFeedPageMapper
 import no.jobvacancydata.ingestion.client.nav.NavFeedRestClient
+import no.jobvacancydata.ingestion.client.nav.NavVacancyDetailResponseMapper
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -17,7 +21,8 @@ class NavFeedConfiguration {
 
 	@Bean
 	fun navFeedClient(
-		mapper: NavFeedPageMapper,
+		pageMapper: NavFeedPageMapper,
+		detailMapper: NavVacancyDetailResponseMapper,
 		properties: NavFeedProperties,
 		@Qualifier("navFeedToken") navFeedToken: String,
 	): NavFeedClient {
@@ -36,10 +41,22 @@ class NavFeedConfiguration {
 
 		return NavFeedRestClient(
 			restClient = restClient,
-			mapper = mapper,
+			pageMapper = pageMapper,
+			detailMapper = detailMapper,
 			baseUrl = properties.baseUrl,
 			retryMaxAttempts = properties.retryMaxAttempts,
 			retryWaitDuration = properties.retryWaitDuration,
 		)
 	}
+
+	@Bean
+	fun navCollectionWorker(navFeedClient: NavFeedClient): NavCollectionWorker =
+		NavCollectionWorker(navFeedClient)
+
+	@Bean
+	fun vacancyIngestionWorker(
+		navCollectionWorker: NavCollectionWorker,
+		brregEnrichmentWorker: BrregEnrichmentWorker,
+	): VacancyIngestionWorker =
+		VacancyIngestionWorker(navCollectionWorker, brregEnrichmentWorker)
 }

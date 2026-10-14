@@ -21,6 +21,7 @@ import tools.jackson.databind.json.JsonMapper
 class NavFeedRestClientTests {
 	private val jsonMapper = JsonMapper.builder().build()
 	private val pageMapper = NavFeedPageMapper(jsonMapper)
+	private val detailMapper = NavVacancyDetailResponseMapper(jsonMapper)
 
 	@Test
 	fun `fetches first page and returns next cursor`() {
@@ -53,6 +54,26 @@ class NavFeedRestClientTests {
 
 		assertThat(result.page.items).hasSize(1)
 		assertThat(result.nextCursor).isNull()
+		server.verify()
+	}
+
+	@Test
+	fun `rejects an unsafe continuation url from the feed as a malformed response`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo(FEED_URL))
+			.andRespond(
+				withSuccess(
+					feedPageJson(nextUrl = "https://evil.test${NavFeedPaths.FEED_PATH}?next=x"),
+					MediaType.APPLICATION_JSON,
+				),
+			)
+
+		val exception = assertThrows<NavFeedMalformedResponseException> { client.fetchPage() }
+
+		assertThat(exception.message).doesNotContain("evil.test")
 		server.verify()
 	}
 
@@ -149,19 +170,32 @@ class NavFeedRestClientTests {
 	}
 
 	@Test
-	fun `exposes retry-after for rate limited response without retrying`() {
+	fun `retries rate limited page after retry-after`() {
 		val builder = RestClient.builder()
 		val server = MockRestServiceServer.bindTo(builder).build()
 		val client = createClient(builder.build())
 
 		server.expect(requestTo(FEED_URL))
-			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "5"))
+			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "0"))
+		server.expect(requestTo(FEED_URL))
+			.andRespond(withSuccess(feedPageJson(nextUrl = null), MediaType.APPLICATION_JSON))
 
-		val exception = assertThrows<NavFeedRateLimitedException> {
-			client.fetchPage()
-		}
+		assertThat(client.fetchPage()).isInstanceOf(FeedFetchResult.Page::class.java)
+		server.verify()
+	}
 
-		assertThat(exception.retryAfter).isEqualTo("5")
+	@Test
+	fun `defers rate limit when retry-after exceeds in-run wait bound`() {
+		val builder = RestClient.builder()
+		val server = MockRestServiceServer.bindTo(builder).build()
+		val client = createClient(builder.build())
+
+		server.expect(requestTo(FEED_URL))
+			.andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "31"))
+
+		val exception = assertThrows<NavFeedRateLimitedException> { client.fetchPage() }
+
+		assertThat(exception.retryAfter).isEqualTo("31")
 		server.verify()
 	}
 
@@ -227,6 +261,7 @@ class NavFeedRestClientTests {
 		NavFeedRestClient(
 			restClient,
 			pageMapper,
+			detailMapper,
 			TEST_BASE_URL,
 			retryMaxAttempts,
 			Duration.ZERO,

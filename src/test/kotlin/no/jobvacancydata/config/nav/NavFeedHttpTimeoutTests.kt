@@ -5,6 +5,7 @@ import java.net.InetSocketAddress
 import java.time.Duration
 import no.jobvacancydata.ingestion.client.nav.NavFeedPageMapper
 import no.jobvacancydata.ingestion.client.nav.NavFeedPaths
+import no.jobvacancydata.ingestion.client.nav.NavVacancyDetailResponseMapper
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.web.client.ResourceAccessException
@@ -46,6 +47,7 @@ class NavFeedHttpTimeoutTests {
 			)
 			val client = NavFeedConfiguration().navFeedClient(
 				NavFeedPageMapper(JsonMapper.builder().build()),
+				NavVacancyDetailResponseMapper(JsonMapper.builder().build()),
 				properties,
 				"synthetic-token",
 			)
